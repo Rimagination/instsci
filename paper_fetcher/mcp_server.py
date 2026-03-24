@@ -53,7 +53,7 @@ async def fetch_paper(identifier: str, format: str = "markdown") -> str:
     elif format == "text":
         return paper.to_text()
     else:
-        return paper.to_markdown()
+        return paper.to_markdown(include_pdf_path=True)
 
 
 @mcp.tool()

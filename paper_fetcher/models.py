@@ -25,7 +25,7 @@ class Paper:
         """Serialize to JSON string."""
         return json.dumps(asdict(self), indent=indent, ensure_ascii=False)
 
-    def to_markdown(self) -> str:
+    def to_markdown(self, include_pdf_path: bool = False) -> str:
         """Render as Markdown for Claude consumption."""
         lines = []
         lines.append(f"# {self.title or 'Untitled'}")
@@ -40,6 +40,8 @@ class Paper:
             lines.append(f"**DOI:** {self.doi}")
         if self.source:
             lines.append(f"**Source:** {self.source}")
+        if include_pdf_path and self.pdf_path:
+            lines.append(f"**PDF saved to:** {self.pdf_path}")
         lines.append("")
 
         if self.abstract:

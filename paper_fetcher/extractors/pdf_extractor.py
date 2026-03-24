@@ -71,6 +71,27 @@ def extract_figures(pdf_path: str | Path) -> list[str]:
     return captions
 
 
+def extract_figures_from_text(text: str) -> list[str]:
+    """Extract figure captions from already-extracted text.
+
+    Args:
+        text: Extracted text content from a PDF.
+
+    Returns:
+        List of figure caption strings.
+    """
+    if not text:
+        return []
+
+    captions = []
+    for match in FIGURE_PATTERN.finditer(text):
+        caption = match.group(0).strip()
+        if len(caption) > 10:
+            captions.append(caption)
+
+    return captions
+
+
 def extract_from_bytes(pdf_bytes: bytes) -> str:
     """Extract text from PDF bytes (e.g., from a download).
 

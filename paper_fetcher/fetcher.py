@@ -22,6 +22,20 @@ logger = logging.getLogger(__name__)
 DOI_PATTERN = re.compile(r"^10\.\d{4,9}/[^\s]+$")
 EZPROXY_DOMAIN = "eproxy.lib.hku.hk"
 
+# Minimum full_text length to consider a fetch "successful"
+MIN_FULLTEXT_LEN = 1000
+
+# ── Publisher PDF URL templates ──
+# Given a DOI like "10.1021/acsami.8b13329", construct direct PDF URL.
+PUBLISHER_PDF_TEMPLATES = {
+    "pubs.acs.org":             "https://pubs.acs.org/doi/pdf/{doi}",
+    "onlinelibrary.wiley.com":  "https://onlinelibrary.wiley.com/doi/pdfdirect/{doi}",
+    "pubs.rsc.org":             "https://pubs.rsc.org/en/content/articlepdf/{year}/{journal_code}/{doi_suffix}",
+    "www.tandfonline.com":      "https://www.tandfonline.com/doi/pdf/{doi}",
+    "www.nature.com":           "https://www.nature.com/articles/{doi_suffix}.pdf",
+    "link.springer.com":        "https://link.springer.com/content/pdf/{doi}.pdf",
+}
+
 
 class PaperFetcher:
     """Main class for fetching academic papers."""
@@ -51,19 +65,22 @@ class PaperFetcher:
         doi = self._parse_doi(identifier)
         url = self._parse_url(identifier)
 
-        # Check cache
+        # Check cache — only return if the cached result has real full text
         if use_cache and doi:
             cached = self._load_cache(doi)
-            if cached:
-                logger.info("Loaded from cache: %s", doi)
+            if cached and len(cached.full_text or "") >= MIN_FULLTEXT_LEN:
+                logger.info("Loaded from cache (good full text): %s", doi)
                 return cached
+            elif cached:
+                logger.info("Cache hit but full text too short (%d chars), re-fetching: %s",
+                            len(cached.full_text or ""), doi)
 
         paper = Paper(doi=doi or "", url=url or "")
 
         # Step 1: Try Open Access sources first (if we have a DOI)
         if doi:
             oa_paper = self._try_open_access(doi)
-            if oa_paper and oa_paper.full_text:
+            if oa_paper and len(oa_paper.full_text or "") >= MIN_FULLTEXT_LEN:
                 self._save_cache(oa_paper)
                 return oa_paper
             # Even if OA didn't get full text, preserve metadata
@@ -79,18 +96,29 @@ class PaperFetcher:
             logger.error("Could not determine URL for: %s", identifier)
             return paper
 
-        # Step 3: Fetch via EZproxy
+        # Step 3: Try direct publisher PDF URL construction (before EZproxy HTML)
+        if doi and not paper.pdf_path:
+            pdf_paper = self._try_publisher_pdf(doi, url, paper)
+            if pdf_paper and len(pdf_paper.full_text or "") >= MIN_FULLTEXT_LEN:
+                self._save_cache(pdf_paper)
+                return pdf_paper
+
+        # Step 4: Fetch via EZproxy
         self._rate_limit()
         paper = self._fetch_via_ezproxy(url, paper)
 
-        # Save to cache
-        if paper.full_text and paper.doi:
+        # Save to cache only if we got real full text
+        if paper.doi and len(paper.full_text or "") >= MIN_FULLTEXT_LEN:
             self._save_cache(paper)
 
         return paper
 
     def _try_open_access(self, doi: str) -> Paper | None:
-        """Try to fetch paper from Open Access sources."""
+        """Try to fetch paper from Open Access sources.
+
+        Priority: arXiv PDF > OA PDF > OA HTML.
+        If HTML extraction is too short, attempt PDF fallback from HTML page.
+        """
         logger.info("Checking Unpaywall for OA version of %s...", doi)
         oa = unpaywall.check_oa(doi, email=self.config.email)
 
@@ -114,7 +142,7 @@ class PaperFetcher:
         if arxiv_id:
             return self._fetch_arxiv(arxiv_id, paper)
 
-        # Try direct OA PDF download
+        # Try direct OA PDF download FIRST (always prefer PDF over HTML)
         if oa.pdf_url:
             logger.info("Downloading OA PDF: %s", oa.pdf_url)
             paper.source = "open_access"
@@ -122,18 +150,29 @@ class PaperFetcher:
             try:
                 resp = requests.get(oa.pdf_url, timeout=60, stream=True)
                 resp.raise_for_status()
-                if "pdf" in resp.headers.get("content-type", "").lower():
+                ct = resp.headers.get("content-type", "").lower()
+                if "pdf" in ct:
                     pdf_bytes = resp.content
                     paper.full_text = pdf_extractor.extract_from_bytes(pdf_bytes)
-                    paper.figures = pdf_extractor.extract_figures_from_text(paper.full_text) if hasattr(pdf_extractor, 'extract_figures_from_text') else []
+                    paper.figures = pdf_extractor.extract_figures_from_text(
+                        paper.full_text
+                    ) if hasattr(pdf_extractor, 'extract_figures_from_text') else []
                     # Save PDF
                     pdf_path = self._save_pdf(doi, pdf_bytes)
                     paper.pdf_path = str(pdf_path) if pdf_path else ""
-                    return paper
+                    if len(paper.full_text or "") >= MIN_FULLTEXT_LEN:
+                        return paper
+                    else:
+                        logger.warning(
+                            "OA PDF text too short (%d chars), continuing...",
+                            len(paper.full_text or ""),
+                        )
+                else:
+                    logger.warning("OA PDF URL returned non-PDF content-type: %s", ct)
             except requests.RequestException as e:
                 logger.warning("Failed to download OA PDF: %s", e)
 
-        # Try OA HTML
+        # Try OA HTML (but don't return immediately — check quality first)
         if oa.html_url:
             logger.info("Fetching OA HTML: %s", oa.html_url)
             paper.source = "open_access"
@@ -143,7 +182,33 @@ class PaperFetcher:
                 resp.raise_for_status()
                 extracted = html_extractor.extract(resp.text, oa.html_url)
                 self._apply_extracted(paper, extracted)
-                return paper
+
+                # If HTML extraction got enough text, return
+                if len(paper.full_text or "") >= MIN_FULLTEXT_LEN:
+                    return paper
+
+                # HTML extraction was too short — try to find PDF link in the page
+                logger.info(
+                    "OA HTML extraction too short (%d chars), looking for PDF link...",
+                    len(paper.full_text or ""),
+                )
+                pdf_url = self._find_pdf_link(resp.text, resp.url)
+                if pdf_url:
+                    logger.info("Found PDF link in OA HTML page: %s", pdf_url)
+                    self._rate_limit()
+                    try:
+                        pdf_resp = requests.get(pdf_url, timeout=60)
+                        pdf_resp.raise_for_status()
+                        if "pdf" in pdf_resp.headers.get("content-type", "").lower():
+                            pdf_bytes = pdf_resp.content
+                            paper.full_text = pdf_extractor.extract_from_bytes(pdf_bytes)
+                            pdf_path = self._save_pdf(doi, pdf_bytes)
+                            paper.pdf_path = str(pdf_path) if pdf_path else ""
+                            if len(paper.full_text or "") >= MIN_FULLTEXT_LEN:
+                                return paper
+                    except requests.RequestException as e:
+                        logger.warning("Failed to download PDF from HTML link: %s", e)
+
             except requests.RequestException as e:
                 logger.warning("Failed to fetch OA HTML: %s", e)
 
@@ -172,6 +237,75 @@ class PaperFetcher:
 
         return paper
 
+    def _try_publisher_pdf(self, doi: str, resolved_url: str, paper: Paper) -> Paper | None:
+        """Try to directly construct and download the publisher PDF URL.
+
+        Many publishers have predictable PDF URL patterns.
+        We try these via EZproxy before falling back to HTML extraction.
+        """
+        parsed = urlparse(resolved_url)
+        hostname = parsed.netloc.lower()
+
+        # Determine which template to use
+        pdf_url = None
+        doi_suffix = doi.split("/", 1)[-1] if "/" in doi else doi
+
+        if "pubs.acs.org" in hostname:
+            pdf_url = f"https://pubs.acs.org/doi/pdf/{doi}"
+        elif "onlinelibrary.wiley.com" in hostname:
+            pdf_url = f"https://onlinelibrary.wiley.com/doi/pdfdirect/{doi}"
+        elif "tandfonline.com" in hostname:
+            pdf_url = f"https://www.tandfonline.com/doi/pdf/{doi}?needAccess=true"
+        elif "nature.com" in hostname:
+            pdf_url = f"https://www.nature.com/articles/{doi_suffix}.pdf"
+        elif "link.springer.com" in hostname:
+            pdf_url = f"https://link.springer.com/content/pdf/{doi}.pdf"
+        elif "pubs.rsc.org" in hostname:
+            # RSC uses article-specific suffix, try the resolved URL pattern
+            pdf_url = resolved_url.replace("/articlelanding/", "/articlepdf/")
+            if pdf_url == resolved_url:
+                pdf_url = None  # Pattern didn't match
+
+        if not pdf_url:
+            return None
+
+        logger.info("Trying constructed publisher PDF URL: %s", pdf_url)
+
+        # Ensure authenticated
+        if not self.auth.login():
+            logger.error("EZproxy authentication failed.")
+            return None
+
+        self._rate_limit()
+        try:
+            resp = self.auth.fetch(pdf_url)
+            resp.raise_for_status()
+            ct = resp.headers.get("content-type", "").lower()
+
+            if "pdf" in ct and len(resp.content) > 10000:
+                pdf_bytes = resp.content
+                paper.full_text = pdf_extractor.extract_from_bytes(pdf_bytes)
+                paper.figures = pdf_extractor.extract_figures_from_text(
+                    paper.full_text
+                ) if hasattr(pdf_extractor, 'extract_figures_from_text') else []
+                pdf_path = self._save_pdf(doi, pdf_bytes)
+                paper.pdf_path = str(pdf_path) if pdf_path else ""
+                paper.source = "ezproxy"
+                logger.info(
+                    "Publisher PDF downloaded successfully (%d bytes, %d chars text)",
+                    len(pdf_bytes), len(paper.full_text or ""),
+                )
+                return paper
+            else:
+                logger.info(
+                    "Publisher PDF URL returned non-PDF or too small (ct=%s, size=%d)",
+                    ct, len(resp.content),
+                )
+        except requests.RequestException as e:
+            logger.warning("Failed to fetch publisher PDF: %s", e)
+
+        return None
+
     def _fetch_via_ezproxy(self, url: str, paper: Paper) -> Paper:
         """Fetch paper through EZproxy authenticated session."""
         # Ensure we're authenticated
@@ -190,7 +324,7 @@ class PaperFetcher:
 
         content_type = resp.headers.get("content-type", "").lower()
 
-        # If response is PDF
+        # If response is PDF directly
         if "pdf" in content_type:
             pdf_bytes = resp.content
             paper.full_text = pdf_extractor.extract_from_bytes(pdf_bytes)
@@ -205,18 +339,21 @@ class PaperFetcher:
         # Always try to find and download PDF for local storage
         pdf_url = self._find_pdf_link(resp.text, resp.url)
         if pdf_url:
-            logger.info("Found PDF link, downloading: %s", pdf_url)
+            logger.info("Found PDF link in HTML, downloading: %s", pdf_url)
             self._rate_limit()
             try:
                 pdf_resp = self.auth.fetch(pdf_url)
                 pdf_resp.raise_for_status()
-                if "pdf" in pdf_resp.headers.get("content-type", "").lower():
+                ct = pdf_resp.headers.get("content-type", "").lower()
+                if "pdf" in ct and len(pdf_resp.content) > 10000:
                     pdf_bytes = pdf_resp.content
                     pdf_path = self._save_pdf(paper.doi or "unknown", pdf_bytes)
                     paper.pdf_path = str(pdf_path) if pdf_path else ""
-                    # If HTML extraction was poor, use PDF text instead
-                    if not paper.full_text or len(paper.full_text) < 500:
+                    # If HTML extraction was poor, use PDF text
+                    if len(paper.full_text or "") < MIN_FULLTEXT_LEN:
                         paper.full_text = pdf_extractor.extract_from_bytes(pdf_bytes)
+                        logger.info("Replaced HTML text with PDF text (%d chars)",
+                                    len(paper.full_text or ""))
             except requests.RequestException as e:
                 logger.warning("Failed to download PDF: %s", e)
 
@@ -232,25 +369,69 @@ class PaperFetcher:
         paper.references = extracted.get("references", [])
 
     def _find_pdf_link(self, html: str, base_url: str) -> str | None:
-        """Find a PDF download link in an HTML page."""
+        """Find a PDF download link in an HTML page.
+
+        Tries multiple strategies:
+        1. Look for <a> tags with PDF-related text/class/href
+        2. Look for <meta> citation_pdf_url
+        3. Construct publisher-specific PDF URLs from the page URL
+        """
         from bs4 import BeautifulSoup
 
         soup = BeautifulSoup(html, "lxml")
         parsed = urlparse(base_url)
         base = f"{parsed.scheme}://{parsed.netloc}"
+        hostname = parsed.netloc.lower()
 
-        # Common PDF link patterns
+        # Strategy 1: <meta name="citation_pdf_url">
+        meta_pdf = soup.find("meta", attrs={"name": "citation_pdf_url"})
+        if meta_pdf and meta_pdf.get("content"):
+            pdf_url = meta_pdf["content"]
+            logger.info("Found PDF URL in <meta citation_pdf_url>: %s", pdf_url)
+            return self._resolve_url(pdf_url, base)
+
+        # Strategy 2: Common <a> tag patterns
         for a in soup.find_all("a", href=True):
             href = a["href"]
             text = a.get_text(strip=True).lower()
             classes = " ".join(a.get("class", []))
 
-            if any(kw in text for kw in ["pdf", "download pdf", "full text pdf"]):
+            if any(kw in text for kw in ["pdf", "download pdf", "full text pdf",
+                                          "view pdf", "get pdf"]):
                 return self._resolve_url(href, base)
-            if any(kw in classes for kw in ["pdf", "download-pdf"]):
+            if any(kw in classes for kw in ["pdf", "download-pdf", "pdf-download",
+                                             "article-pdf", "article__pdf"]):
                 return self._resolve_url(href, base)
             if href.endswith(".pdf"):
                 return self._resolve_url(href, base)
+            # ACS-specific: /doi/pdf/ links
+            if "/doi/pdf/" in href:
+                return self._resolve_url(href, base)
+            # Wiley-specific: /doi/pdfdirect/ or /doi/epdf/
+            if "/doi/pdfdirect/" in href or "/doi/epdf/" in href:
+                return self._resolve_url(href, base)
+
+        # Strategy 3: Construct from known publisher URL patterns
+        path = parsed.path
+        if "pubs.acs.org" in hostname and "/doi/" in path and "/pdf/" not in path:
+            # /doi/10.1021/xxx → /doi/pdf/10.1021/xxx
+            doi_part = path.split("/doi/")[-1]
+            if doi_part:
+                return f"{base}/doi/pdf/{doi_part}"
+
+        if "onlinelibrary.wiley.com" in hostname and "/doi/" in path and "/pdfdirect/" not in path:
+            doi_part = path.split("/doi/")[-1]
+            if doi_part:
+                return f"{base}/doi/pdfdirect/{doi_part}"
+
+        if "pubs.rsc.org" in hostname and "/articlelanding/" in path:
+            return base_url.replace("/articlelanding/", "/articlepdf/")
+
+        if "tandfonline.com" in hostname and "/doi/" in path and "/pdf/" not in path:
+            # /doi/full/10.xxx → /doi/pdf/10.xxx
+            doi_part = re.sub(r"/doi/(?:full|abs)/", "/doi/pdf/", path)
+            if doi_part != path:
+                return f"{base}{doi_part}"
 
         return None
 
@@ -349,13 +530,24 @@ class PaperFetcher:
             return None
 
     def _save_cache(self, paper: Paper):
-        """Save paper result to cache."""
+        """Save paper result to cache.
+
+        Only caches results with meaningful full text (>= MIN_FULLTEXT_LEN chars)
+        to avoid caching abstract-only failures.
+        """
         if not paper.doi:
+            return
+        if len(paper.full_text or "") < MIN_FULLTEXT_LEN:
+            logger.info(
+                "Skipping cache save for %s: full_text too short (%d chars)",
+                paper.doi, len(paper.full_text or ""),
+            )
             return
         path = self._cache_key(paper.doi)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(paper.to_json(), encoding="utf-8")
+            logger.info("Cached result for %s (%d chars)", paper.doi, len(paper.full_text or ""))
         except OSError as e:
             logger.warning("Failed to save cache for %s: %s", paper.doi, e)
 
