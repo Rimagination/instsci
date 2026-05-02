@@ -1,4 +1,4 @@
-"""Data models for paper-fetcher."""
+"""Data models for vpnsci."""
 
 import json
 from dataclasses import asdict, dataclass, field
@@ -17,7 +17,7 @@ class Paper:
     full_text: str = ""
     figures: list[str] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
-    source: str = ""  # "ezproxy" | "open_access" | "arxiv"
+    source: str = ""  # "webvpn" | "open_access" | "arxiv"
     pdf_path: str = ""
     url: str = ""
 

@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "paper-fetcher"
+name = "vpnsci"
 version = "0.1.0"
-description = "Automated academic paper full-text fetcher with HKU EZproxy support"
+description = "Academic paper fetcher with multi-university WebVPN support"
 requires-python = ">=3.10"
 dependencies = [
     "typer>=0.9.0",
@@ -14,14 +14,17 @@ dependencies = [
     "beautifulsoup4>=4.12.0",
     "lxml>=4.9.0",
     "selenium>=4.15.0",
-    "webdriver-manager>=4.0.0",
     "pymupdf>=1.23.0",
     "mcp[cli]>=1.0.0",
+    "pycryptodome>=3.15.0",
 ]
 
 [project.scripts]
-paper-fetcher = "paper_fetcher.cli:app"
-paper-fetcher-mcp = "paper_fetcher.mcp_server:main"
+vpnsci = "vpnsci.cli:app"
+vpnsci-mcp = "vpnsci.mcp_server:main"
 
 [tool.setuptools.packages.find]
-include = ["paper_fetcher*"]
+include = ["vpnsci*"]
+
+[tool.setuptools.package-data]
+vpnsci = ["data/*.json"]

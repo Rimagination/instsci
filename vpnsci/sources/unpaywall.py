@@ -24,7 +24,7 @@ class OAResult:
     year: int | None = None
 
 
-def check_oa(doi: str, email: str = "paper-fetcher@example.com") -> OAResult:
+def check_oa(doi: str, email: str = "vpnsci@example.com") -> OAResult:
     """Check if a DOI has an Open Access version via Unpaywall.
 
     Args:

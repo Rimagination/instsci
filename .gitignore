@@ -35,7 +35,7 @@ desktop.ini
 .env.local
 .env.*.local
 
-# Runtime data (created in ~/.paper-fetcher/)
+# Runtime data (created in ~/.vpnsci/)
 cookies.json
 config.json
 chrome-profile/

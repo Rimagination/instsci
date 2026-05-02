@@ -1,4 +1,4 @@
-"""Paper Fetcher - Automated academic paper full-text fetcher with HKU EZproxy support."""
+"""VpnSci - Academic paper fetcher with multi-university WebVPN support."""
 
 from .config import Config
 from .fetcher import PaperFetcher

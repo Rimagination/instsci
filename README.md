@@ -1,155 +1,133 @@
-# paper-fetcher
+# vpnsci
 
-An MCP server and CLI tool for fetching academic paper full texts. Designed to work as a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) MCP tool, enabling AI-assisted literature review and research workflows.
+多校 WebVPN 学术论文全文获取工具，支持 100+ 中国高校。可作为 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) MCP Server 使用。
 
-## How It Works
+## 工作原理
 
-paper-fetcher uses a three-layer strategy to maximize access to full-text papers:
+vpnsci 采用三层策略获取论文全文：
 
 ```
-Layer 1: Open Access (Unpaywall + arXiv)     ← free, no login required
-Layer 2: Institutional proxy (EZproxy)        ← requires university login
-Layer 3: Metadata only (Semantic Scholar)     ← always available
+Layer 1: Open Access (Unpaywall + arXiv)    ← 免费，无需登录
+Layer 2: WebVPN 机构代理                     ← 需要校园网账号登录
+Layer 3: 元数据 (Semantic Scholar)           ← 始终可用
 ```
 
-For each paper request, it tries Open Access sources first. If the paper is paywalled, it falls back to your institution's EZproxy. Metadata and search are always available via Semantic Scholar.
+## 支持的学校
 
-## Features
-
-- **MCP Server** - Integrate directly with Claude Code for AI-powered research
-- **Three access layers** - Open Access, institutional EZproxy, and metadata fallback
-- **Multi-source search** - Search papers via Semantic Scholar API
-- **Full-text extraction** - Extract text from HTML and PDF sources
-- **Publisher adapters** - Optimized extraction for Nature, ACS, Elsevier, Wiley, and more
-- **Smart caching** - Cache fetched papers locally to avoid redundant requests
-- **Rate limiting** - Built-in polite request delays
-- **CLI interface** - Standalone command-line tool for batch operations
-
-## Installation
+内置 100+ 高校 WebVPN 配置，包括清华、北大、复旦、浙大、上海交大、大连理工、东北大学等。查看完整列表：
 
 ```bash
-# Clone the repository
-git clone https://github.com/YOUR_USERNAME/paper-fetcher.git
-cd paper-fetcher
+vpnsci schools          # 列出所有学校
+vpnsci schools 北京      # 按省份搜索
+vpnsci schools 大连      # 按名称搜索
+```
 
-# Install in development mode
+## 安装
+
+```bash
+git clone <repo-url>
+cd vpnsci
 pip install -e .
 ```
 
-## Setup with Claude Code
-
-Register paper-fetcher as an MCP server in Claude Code:
+## 快速开始
 
 ```bash
-claude mcp add paper-fetcher -- paper-fetcher-mcp
+# 1. 设置学校
+vpnsci config-cmd --school 清华大学
+
+# 2. 设置邮箱（Unpaywall OA 检测需要）
+vpnsci config-cmd --email your@email.com
+
+# 3. 登录 WebVPN（浏览器会弹出，完成 CAS 认证）
+vpnsci login
+
+# 4. 获取论文
+vpnsci fetch "10.1038/s41566-024-01234-5"
 ```
 
-After restarting Claude Code, you can ask Claude to search and fetch papers directly:
+## CLI 用法
 
-> "Search for recent papers on perovskite solar cells"
-> "Fetch the full text of DOI 10.1038/s41566-024-01234-5"
-
-## CLI Usage
-
-### Login to EZproxy (institutional access)
+### 登录 WebVPN
 
 ```bash
-# Opens a browser for manual login. Cookies are saved for future use.
-paper-fetcher login
-
-# Force re-login even if session appears valid
-paper-fetcher login --force
+vpnsci login              # 首次登录或 session 过期时使用
+vpnsci login --force      # 强制重新登录
 ```
 
-### Search for papers
+### 获取论文
 
 ```bash
-# Basic search
-paper-fetcher search "organic photovoltaics stability"
+# 按 DOI
+vpnsci fetch "10.1038/s41566-024-01234-5"
 
-# Limit results and filter by year
-paper-fetcher search "perovskite solar cells" --limit 20 --year 2022-2025
+# 按 URL
+vpnsci fetch "https://www.nature.com/articles/s41566-024-01234-5"
 
-# Search and fetch full texts
-paper-fetcher search "silver nanowire transparent electrode" --fetch
+# 输出 markdown 格式
+vpnsci fetch "10.1038/s41566-024-01234-5" --format markdown
+
+# 纯文本（节省 token）
+vpnsci fetch "10.1038/s41566-024-01234-5" --text-only
 ```
 
-### Fetch a single paper
+### 批量获取
 
 ```bash
-# By DOI
-paper-fetcher fetch "10.1038/s41566-024-01234-5"
-
-# By URL
-paper-fetcher fetch "https://www.nature.com/articles/s41566-024-01234-5"
-
-# Output as markdown
-paper-fetcher fetch "10.1038/s41566-024-01234-5" --format markdown
+# 创建一个 DOI 文件（每行一个 DOI）
+vpnsci batch dois.txt --format markdown --output ./papers
 ```
 
-### Batch fetch
+### 搜索论文
 
 ```bash
-# Create a file with one DOI per line
-paper-fetcher batch dois.txt --format markdown --output ./papers
+vpnsci search "perovskite solar cells"
+vpnsci search "organic photovoltaics" --limit 20 --year 2022-2025
+vpnsci search "silver nanowire" --fetch  # 搜索并获取全文
 ```
 
-### Configuration
+### 切换学校
 
 ```bash
-# View current config
-paper-fetcher config-cmd
-
-# Set email (required for Unpaywall OA detection)
-paper-fetcher config-cmd --email your@email.com
-
-# Set output directory
-paper-fetcher config-cmd --output-dir ./my-papers
+vpnsci config-cmd --school 大连理工大学
 ```
 
-## Configuration
+## Claude Code MCP 集成
 
-Configuration is stored at `~/.paper-fetcher/config.json` and includes:
-
-| Field | Description | Default |
-|-------|-------------|---------|
-| `proxy_base` | Your institution's EZproxy login URL | `http://eproxy.lib.hku.hk/login?url=` |
-| `email` | Email for Unpaywall API (OA detection) | `""` (set via CLI) |
-| `output_dir` | Directory for downloaded PDFs | `~/.paper-fetcher/papers` |
-| `cache_dir` | Directory for cached results | `~/.paper-fetcher/cache` |
-| `request_delay_min` | Minimum delay between requests (seconds) | `2.0` |
-| `request_delay_max` | Maximum delay between requests (seconds) | `5.0` |
-
-To use with a different institution's EZproxy, edit `~/.paper-fetcher/config.json`:
-
-```json
-{
-  "proxy_base": "http://your-institution-proxy.edu/login?url=",
-  "email": "your@email.com"
-}
+```bash
+claude mcp add vpnsci -- vpnsci-mcp
 ```
 
-## MCP Tools
+注册后重启 Claude Code，即可用自然语言：
 
-When used as an MCP server, paper-fetcher exposes three tools:
+> "帮我搜几篇关于钙钛矿太阳能电池的最新论文"
+> "把这篇 DOI 10.1038/xxx 的全文拉下来"
 
-| Tool | Description |
-|------|-------------|
-| `search_papers` | Search for papers via Semantic Scholar (query, limit, year_range) |
-| `fetch_paper` | Fetch full text by DOI or URL (identifier, format) |
-| `get_paper_metadata` | Get paper metadata by DOI without downloading full text |
+## 配置
 
-## Project Structure
+配置文件位于 `~/.vpnsci/config.json`：
+
+| 字段 | 说明 | 默认值 |
+|------|------|--------|
+| `school` | 学校名称 | `清华大学` |
+| `webvpn_base_url` | WebVPN 地址（自动从学校解析） | `""` |
+| `email` | Unpaywall API 邮箱 | `""` |
+| `output_dir` | PDF 保存目录 | `~/.vpnsci/papers` |
+| `cache_dir` | 缓存目录 | `~/.vpnsci/cache` |
+
+## 项目结构
 
 ```
-paper-fetcher/
-├── paper_fetcher/
-│   ├── mcp_server.py          # MCP server (3 tools)
-│   ├── cli.py                 # CLI interface (Typer)
-│   ├── fetcher.py             # Core fetching logic
-│   ├── auth.py                # EZproxy authentication (Selenium)
-│   ├── config.py              # Configuration management
-│   ├── models.py              # Paper data model
+vpnsci/
+├── vpnsci/
+│   ├── mcp_server.py          # MCP Server
+│   ├── cli.py                 # CLI (Typer)
+│   ├── fetcher.py             # 核心获取逻辑
+│   ├── auth.py                # WebVPN 认证 (Selenium + AES)
+│   ├── config.py              # 配置管理
+│   ├── schools.py             # 学校数据库
+│   ├── models.py              # Paper 数据模型
+│   ├── data/webvpn.json       # 100+ 高校 WebVPN 配置
 │   ├── sources/
 │   │   ├── semantic_scholar.py
 │   │   ├── unpaywall.py
@@ -158,67 +136,26 @@ paper-fetcher/
 │       ├── html_extractor.py
 │       ├── pdf_extractor.py
 │       └── publisher_adapters/
-│           ├── nature.py
-│           ├── acs.py
-│           ├── elsevier.py
-│           ├── wiley.py
-│           └── generic.py
 ├── tests/
 ├── pyproject.toml
-├── LICENSE
 └── README.md
 ```
 
-## Requirements
+## 环境要求
 
 - Python >= 3.10
-- Chrome browser (for EZproxy authentication)
+- Chrome 浏览器（WebVPN CAS 登录需要）
+
+## 致谢
+
+本项目参考了以下开源项目：
+
+- [lcandy2/webvpn-converter](https://github.com/lcandy2/webvpn-converter) — 100+ 高校 WebVPN 配置数据库，本项目的学校数据来源
+- [Konano/Tuna-Erha-Bot](https://github.com/Konano/Tuna-Erha-Bot) — 清华 WebVPN URL 加密算法参考
+- [eWloYW8/ZJUWebVPN](https://github.com/eWloYW8/ZJUWebVPN) — 浙大 WebVPN 动态密钥方案参考
+- [qiyang-ustc/CASPaperTunneling](https://github.com/qiyang-ustc/CASPaperTunneling) — CAS 认证流程参考
+- [fermionoid/paper-fetcher](https://github.com/fermionoid/paper-fetcher) — 本项目的前身，论文获取架构参考
 
 ## License
 
 [MIT](LICENSE)
-
----
-
-## 中文简介
-
-**paper-fetcher** 是一个学术论文全文获取工具，可作为 Claude Code 的 MCP Server 使用，让 AI 直接帮你搜索和获取论文全文。
-
-### 核心特性
-
-- **三层获取策略**: Open Access (免费) → 机构代理 EZproxy (需登录) → 元数据兜底
-- **MCP Server**: 注册到 Claude Code 后，直接用自然语言让 AI 搜论文、拉全文
-- **多出版商适配**: 针对 Nature、ACS、Elsevier、Wiley 等做了专门的内容提取优化
-- **本地缓存**: 已获取的论文自动缓存，避免重复请求
-- **命令行工具**: 支持单篇获取、批量获取、搜索等操作
-
-### 快速开始
-
-```bash
-# 安装
-pip install -e .
-
-# 注册到 Claude Code
-claude mcp add paper-fetcher -- paper-fetcher-mcp
-
-# 设置邮箱 (Unpaywall OA 检测需要)
-paper-fetcher config-cmd --email your@email.com
-
-# 登录机构代理 (可选，用于获取付费论文)
-paper-fetcher login
-```
-
-注册后重启 Claude Code，即可直接对话使用：
-
-> "帮我搜几篇关于钙钛矿太阳能电池的最新论文"
-> "把这篇 DOI 10.1038/xxx 的全文拉下来"
-
-### 配置其他机构的 EZproxy
-
-默认配置的是 HKU EZproxy。如需使用其他机构，编辑 `~/.paper-fetcher/config.json`：
-
-```json
-{
-  "proxy_base": "http://your-proxy.university.edu/login?url="
-}
-```

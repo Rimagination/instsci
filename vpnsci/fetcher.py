@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from .auth import EZProxyAuth
+from .auth import WebVPNAuth
 from .config import Config
 from .extractors import html_extractor, pdf_extractor
 from .models import Paper
@@ -20,7 +20,6 @@ from .sources import arxiv, unpaywall
 logger = logging.getLogger(__name__)
 
 DOI_PATTERN = re.compile(r"^10\.\d{4,9}/[^\s]+$")
-EZPROXY_DOMAIN = "eproxy.lib.hku.hk"
 
 # Minimum full_text length to consider a fetch "successful"
 MIN_FULLTEXT_LEN = 1000
@@ -43,13 +42,15 @@ class PaperFetcher:
     def __init__(self, config: Config | None = None):
         self.config = config or Config.load()
         self.config.ensure_dirs()
-        self._auth: EZProxyAuth | None = None
+        self._auth: WebVPNAuth | None = None
         self._last_request_time = 0.0
 
     @property
-    def auth(self) -> EZProxyAuth:
+    def auth(self) -> WebVPNAuth:
         if self._auth is None:
-            self._auth = EZProxyAuth(self.config)
+            from .schools import get_school
+            entry = get_school(self.config.school)
+            self._auth = WebVPNAuth(self.config, key=entry.key, iv=entry.iv)
         return self._auth
 
     def fetch(self, identifier: str, use_cache: bool = True) -> Paper:
@@ -103,9 +104,9 @@ class PaperFetcher:
                 self._save_cache(pdf_paper)
                 return pdf_paper
 
-        # Step 4: Fetch via EZproxy
+        # Step 4: Fetch via WebVPN
         self._rate_limit()
-        paper = self._fetch_via_ezproxy(url, paper)
+        paper = self._fetch_via_webvpn(url, paper)
 
         # Save to cache only if we got real full text
         if paper.doi and len(paper.full_text or "") >= MIN_FULLTEXT_LEN:
@@ -241,7 +242,7 @@ class PaperFetcher:
         """Try to directly construct and download the publisher PDF URL.
 
         Many publishers have predictable PDF URL patterns.
-        We try these via EZproxy before falling back to HTML extraction.
+        We try these via WebVPN before falling back to HTML extraction.
         """
         parsed = urlparse(resolved_url)
         hostname = parsed.netloc.lower()
@@ -265,6 +266,12 @@ class PaperFetcher:
             pdf_url = resolved_url.replace("/articlelanding/", "/articlepdf/")
             if pdf_url == resolved_url:
                 pdf_url = None  # Pattern didn't match
+        elif "elsevier.com" in hostname or "sciencedirect.com" in hostname:
+            # Extract PII from URL (e.g. /retrieve/pii/S0929139300000676)
+            pii_match = re.search(r"pii/([A-Z0-9]+)", resolved_url)
+            if pii_match:
+                pii = pii_match.group(1)
+                pdf_url = f"https://www.sciencedirect.com/science/article/pii/{pii}/pdfft"
 
         if not pdf_url:
             return None
@@ -273,7 +280,7 @@ class PaperFetcher:
 
         # Ensure authenticated
         if not self.auth.login():
-            logger.error("EZproxy authentication failed.")
+            logger.error("Proxy authentication failed.")
             return None
 
         self._rate_limit()
@@ -290,7 +297,7 @@ class PaperFetcher:
                 ) if hasattr(pdf_extractor, 'extract_figures_from_text') else []
                 pdf_path = self._save_pdf(doi, pdf_bytes)
                 paper.pdf_path = str(pdf_path) if pdf_path else ""
-                paper.source = "ezproxy"
+                paper.source = "webvpn"
                 logger.info(
                     "Publisher PDF downloaded successfully (%d bytes, %d chars text)",
                     len(pdf_bytes), len(paper.full_text or ""),
@@ -306,20 +313,20 @@ class PaperFetcher:
 
         return None
 
-    def _fetch_via_ezproxy(self, url: str, paper: Paper) -> Paper:
-        """Fetch paper through EZproxy authenticated session."""
+    def _fetch_via_webvpn(self, url: str, paper: Paper) -> Paper:
+        """Fetch paper through WebVPN authenticated session."""
         # Ensure we're authenticated
         if not self.auth.login():
-            logger.error("EZproxy authentication failed.")
+            logger.error("Proxy authentication failed.")
             return paper
 
-        paper.source = "ezproxy"
+        paper.source = "webvpn"
 
         try:
             resp = self.auth.fetch(url)
             resp.raise_for_status()
         except requests.RequestException as e:
-            logger.error("Failed to fetch via EZproxy: %s", e)
+            logger.error("Failed to fetch via proxy: %s", e)
             return paper
 
         content_type = resp.headers.get("content-type", "").lower()
@@ -433,6 +440,13 @@ class PaperFetcher:
             if doi_part != path:
                 return f"{base}{doi_part}"
 
+        # Elsevier/ScienceDirect: /retrieve/pii/{PII} → /science/article/pii/{PII}/pdfft
+        if ("elsevier.com" in hostname or "sciencedirect.com" in hostname):
+            pii_match = re.search(r"pii/([A-Z0-9]+)", path)
+            if pii_match:
+                pii = pii_match.group(1)
+                return f"https://www.sciencedirect.com/science/article/pii/{pii}/pdfft"
+
         return None
 
     def _resolve_url(self, href: str, base: str) -> str:
@@ -477,13 +491,17 @@ class PaperFetcher:
     def _resolve_doi(self, doi: str) -> str | None:
         """Resolve a DOI to its target URL."""
         try:
-            resp = requests.head(
+            resp = requests.get(
                 f"https://doi.org/{doi}",
                 allow_redirects=True,
-                timeout=10,
-                headers={"User-Agent": "paper-fetcher/0.1"},
+                timeout=15,
+                headers={"User-Agent": "vpnsci/0.1"},
+                stream=True,  # Don't download full body
             )
-            if resp.status_code == 200:
+            resp.close()
+            # Many publishers return 403/401 for non-browser GETs, but we still get the resolved URL
+            if resp.url and resp.url != f"https://doi.org/{doi}":
+                logger.info("Resolved DOI %s → %s (status=%d)", doi, resp.url, resp.status_code)
                 return resp.url
         except requests.RequestException as e:
             logger.warning("Failed to resolve DOI %s: %s", doi, e)

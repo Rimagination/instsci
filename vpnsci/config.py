@@ -1,4 +1,4 @@
-"""Configuration management for paper-fetcher."""
+"""Configuration management for vpnsci."""
 
 import json
 import logging
@@ -7,15 +7,16 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BASE_DIR = Path.home() / ".paper-fetcher"
+DEFAULT_BASE_DIR = Path.home() / ".vpnsci"
 
 
 @dataclass
 class Config:
-    """Paper fetcher configuration."""
+    """VpnSci configuration."""
 
-    proxy_base: str = "http://eproxy.lib.hku.hk/login?url="
-    email: str = ""  # Set via 'paper-fetcher config-cmd --email your@email.com'
+    school: str = "清华大学"  # School name (use 'vpnsci schools' to list)
+    webvpn_base_url: str = ""  # Auto-resolved from school if empty
+    email: str = ""  # Set via 'vpnsci config-cmd --email your@email.com'
     output_dir: str = ""
     cache_dir: str = ""
     cookie_path: str = ""
@@ -33,6 +34,14 @@ class Config:
             self.cookie_path = str(base / "cookies.json")
         if not self.chrome_profile_dir:
             self.chrome_profile_dir = str(base / "chrome-profile")
+        # Auto-resolve webvpn_base_url from school if not set
+        if not self.webvpn_base_url and self.school:
+            try:
+                from .schools import get_school
+                entry = get_school(self.school)
+                self.webvpn_base_url = entry.host
+            except ValueError:
+                pass  # School not found; user must set webvpn_base_url manually
 
     def ensure_dirs(self):
         """Create all necessary directories."""

@@ -1,4 +1,4 @@
-"""MCP server exposing paper-fetcher tools for Claude Code."""
+"""MCP server exposing vpnsci tools for Claude Code."""
 
 import logging
 import sys
@@ -18,7 +18,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("paper-fetcher")
+mcp = FastMCP("vpnsci")
 
 # Lazy-initialized shared fetcher instance
 _fetcher: PaperFetcher | None = None
@@ -36,7 +36,7 @@ async def fetch_paper(identifier: str, format: str = "markdown") -> str:
     """Fetch an academic paper's full text by DOI or URL.
 
     Uses Open Access sources (Unpaywall, arXiv) first, then falls back
-    to HKU EZproxy for paywalled content. Results are cached locally.
+    to WebVPN/EZproxy for paywalled content. Results are cached locally.
 
     Args:
         identifier: DOI (e.g. "10.1038/nphys1509") or article URL.
