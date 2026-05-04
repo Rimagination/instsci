@@ -236,6 +236,14 @@ vpnsci/
 - [qiyang-ustc/CASPaperTunneling](https://github.com/qiyang-ustc/CASPaperTunneling) — CAS 认证流程参考
 - [fermionoid/paper-fetcher](https://github.com/fermionoid/paper-fetcher) — 本项目的前身，论文获取架构参考
 
+## 免责声明
+
+- 本项目是一个**学术论文获取工具**，仅用于帮助高校师生合法访问其所在机构已订阅的学术资源。
+- 本项目**不包含**任何深信服（Sangfor）的代码、二进制文件或专有协议实现。
+- 本项目**不提供**VPN 连接功能。对于需要 VPN 的学校，用户需自行配置合法的 VPN 客户端（如学校官方提供的 EasyConnect 客户端）。
+- 本项目通过标准 HTTP 协议访问公开或机构授权的学术资源，与浏览器手动访问无本质区别。
+- 使用者应遵守所在学校的网络使用规范和相关法律法规。本项目不对滥用行为负责。
+
 ## License
 
 [MIT](LICENSE)
