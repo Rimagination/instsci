@@ -589,5 +589,23 @@
       "crypto_key": "wrdvpnisthebest!",
       "crypto_iv": "wrdvpnisthebest!"
     }
+  },
+  "香港": {
+    "香港大学": {
+      "host": "https://eproxy.lib.hku.hk/login?url=",
+      "type": "ezproxy"
+    },
+    "香港科技大学": {
+      "host": "https://lib.ezproxy.hkust.edu.hk/login?url=",
+      "type": "ezproxy"
+    },
+    "香港理工大学": {
+      "host": "http://ezproxy.lb.polyu.edu.hk/login?url=",
+      "type": "ezproxy"
+    },
+    "香港城市大学": {
+      "host": "https://ezproxy.cityu.edu.hk/login?url=",
+      "type": "ezproxy"
+    }
   }
 }
