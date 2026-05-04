@@ -1,7 +1,9 @@
-"""MCP server exposing vpnsci tools for Claude Code."""
+"""MCP server exposing vpnsci tools for AI agents supporting MCP protocol."""
 
+import asyncio
 import logging
 import sys
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
@@ -24,11 +26,66 @@ mcp = FastMCP("vpnsci")
 _fetcher: PaperFetcher | None = None
 
 
-def _get_fetcher() -> PaperFetcher:
+def _get_fetcher() -> PaperFetcher | None:
+    """Get or create the fetcher singleton. Returns None if school not configured."""
     global _fetcher
+    config = Config.load()
+    if not config.school:
+        return None
     if _fetcher is None:
-        _fetcher = PaperFetcher(Config.load())
+        _fetcher = PaperFetcher(config)
     return _fetcher
+
+
+def _reset_fetcher():
+    """Reset the fetcher singleton (called after reconfiguring school)."""
+    global _fetcher
+    if _fetcher is not None:
+        _fetcher.close()
+        _fetcher = None
+
+
+_SCHOOL_NOT_CONFIGURED = (
+    "⚠️ 尚未配置学校。请先告诉我你的学校名称（如「兰州大学」），"
+    "我会帮你配置好再进行操作。\n\n"
+    "你也可以手动运行: vpnsci config-cmd --school 你的学校名称"
+)
+
+
+@mcp.tool()
+async def configure_school(school_name: str) -> str:
+    """Configure which university to use for WebVPN paper access.
+
+    Call this when the user tells you their school name.
+    Supports fuzzy matching (e.g. "兰大" will match "兰州大学").
+
+    Args:
+        school_name: The university name (e.g. "兰州大学", "清华大学").
+    """
+    from .schools import get_school
+
+    try:
+        entry = get_school(school_name)
+    except ValueError:
+        return (
+            f"未找到学校「{school_name}」。"
+            f"请确认学校名称，或使用 vpnsci schools 搜索支持的学校列表。"
+        )
+
+    config = Config.load()
+    config.school = entry.name
+    config.webvpn_base_url = entry.host
+    config.save()
+
+    # Reset fetcher so it picks up the new config
+    _reset_fetcher()
+
+    return (
+        f"✅ 已配置为 **{entry.name}**（{entry.province}）\n"
+        f"WebVPN 地址: {entry.host}\n\n"
+        f"现在可以开始搜索和获取论文了。首次使用 WebVPN 获取付费论文时，"
+        f"会弹出浏览器让你完成校园网登录认证。"
+    )
 
 
 @mcp.tool()
@@ -43,7 +100,10 @@ async def fetch_paper(identifier: str, format: str = "markdown") -> str:
         format: Output format - "markdown" (default), "json", or "text".
     """
     fetcher = _get_fetcher()
-    paper = fetcher.fetch(identifier)
+    if fetcher is None:
+        return _SCHOOL_NOT_CONFIGURED
+
+    paper = await asyncio.to_thread(fetcher.fetch, identifier)
 
     if not paper.full_text and not paper.abstract:
         return f"Could not extract full text for: {identifier}\nTitle: {paper.title}\nURL: {paper.url}"
@@ -68,8 +128,8 @@ async def search_papers(query: str, limit: int = 10, year_range: str = "") -> st
         limit: Maximum number of results (1-100, default 10).
         year_range: Optional year filter (e.g. "2020-2024" or "2020-").
     """
-    results = semantic_scholar.search(
-        query, limit=limit, year_range=year_range or None
+    results = await asyncio.to_thread(
+        semantic_scholar.search, query, limit=limit, year_range=year_range or None
     )
 
     if not results:
@@ -109,7 +169,7 @@ async def get_paper_metadata(doi: str) -> str:
     Args:
         doi: The DOI of the paper (e.g. "10.1038/nphys1509").
     """
-    result = semantic_scholar.get_paper(f"DOI:{doi}")
+    result = await asyncio.to_thread(semantic_scholar.get_paper, f"DOI:{doi}")
     if result is None:
         return f"Paper not found for DOI: {doi}"
 

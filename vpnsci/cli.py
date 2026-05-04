@@ -274,13 +274,15 @@ def schools(
     table.add_column("#", style="dim", width=4)
     table.add_column("Province", width=10)
     table.add_column("School", max_width=25)
-    table.add_column("WebVPN Host", max_width=40)
+    table.add_column("Type", width=12)
+    table.add_column("Host", max_width=40)
     table.add_column("Custom Key", width=5, justify="center")
 
     from .schools import WEBVPN_DEFAULT_KEY
     for i, s in enumerate(results, 1):
         has_custom = "Y" if s.key != WEBVPN_DEFAULT_KEY else ""
-        table.add_row(str(i), s.province, s.name, s.host, has_custom)
+        type_label = "EasyConnect" if s.school_type == "easyconnect" else "WebVPN"
+        table.add_row(str(i), s.province, s.name, type_label, s.host, has_custom)
 
     console.print(table)
 
@@ -292,23 +294,31 @@ def config_cmd(
     set_output: str = typer.Option("", "--output-dir", help="Set default output directory."),
     set_webvpn_url: str = typer.Option("", "--webvpn-url", help="Set WebVPN base URL."),
     set_school: str = typer.Option("", "--school", help="Set school (use 'vpnsci schools' to list)."),
+    set_proxy_url: str = typer.Option("", "--proxy-url", help="Set SOCKS5 proxy URL for EasyConnect."),
+    set_elsevier_key: str = typer.Option("", "--elsevier-api-key", help="Set Elsevier API key."),
+    set_elsevier_token: str = typer.Option("", "--elsevier-inst-token", help="Set Elsevier institutional token."),
+    set_flaresolverr: str = typer.Option("", "--flaresolverr-url", help="Set FlareSolverr URL."),
+    set_carsi_enable: bool = typer.Option(False, "--carsi-enable", help="Enable CARSI/Shibboleth federated auth."),
+    set_carsi_disable: bool = typer.Option(False, "--carsi-disable", help="Disable CARSI auth."),
+    set_carsi_school: str = typer.Option("", "--carsi-school", help="Set school name for CARSI WAYF."),
 ):
     """View or update configuration."""
     cfg = Config.load()
+    changed = False
 
     if set_email:
         cfg.email = set_email
-        cfg.save()
+        changed = True
         console.print(f"[green]Email set to: {set_email}[/green]")
 
     if set_output:
         cfg.output_dir = set_output
-        cfg.save()
+        changed = True
         console.print(f"[green]Output dir set to: {set_output}[/green]")
 
     if set_webvpn_url:
         cfg.webvpn_base_url = set_webvpn_url.rstrip("/")
-        cfg.save()
+        changed = True
         console.print(f"[green]WebVPN base URL set to: {set_webvpn_url}[/green]")
 
     if set_school:
@@ -316,20 +326,122 @@ def config_cmd(
             entry = get_school(set_school)
             cfg.school = entry.name
             cfg.webvpn_base_url = entry.host
-            cfg.save()
-            console.print(f"[green]School set to: {entry.name} ({entry.host})[/green]")
+            changed = True
+            type_label = "EasyConnect" if entry.school_type == "easyconnect" else "WebVPN"
+            console.print(f"[green]School set to: {entry.name} ({type_label}, {entry.host})[/green]")
+            if entry.school_type == "easyconnect":
+                console.print("[yellow]This school uses EasyConnect. Please:[/yellow]")
+                console.print("  1. Connect via zju-connect: [cyan]zju-connect -server {0}[/cyan]".format(entry.host))
+                console.print("  2. Set proxy: [cyan]vpnsci config-cmd --proxy-url socks5://127.0.0.1:1080[/cyan]")
         except ValueError as e:
             console.print(f"[red]{e}[/red]")
             raise typer.Exit(1)
 
-    if show and not set_email and not set_output and not set_webvpn_url and not set_school:
+    if set_proxy_url:
+        cfg.proxy_url = set_proxy_url
+        changed = True
+        console.print(f"[green]Proxy URL set to: {set_proxy_url}[/green]")
+
+    if set_elsevier_key:
+        cfg.elsevier_api_key = set_elsevier_key
+        changed = True
+        console.print("[green]Elsevier API key saved.[/green]")
+
+    if set_elsevier_token:
+        cfg.elsevier_inst_token = set_elsevier_token
+        changed = True
+        console.print("[green]Elsevier institutional token saved.[/green]")
+
+    if set_flaresolverr:
+        cfg.flaresolverr_url = set_flaresolverr.rstrip("/")
+        changed = True
+        console.print(f"[green]FlareSolverr URL set to: {set_flaresolverr}[/green]")
+
+    if set_carsi_enable:
+        cfg.carsi_enabled = True
+        changed = True
+        console.print("[green]CARSI/Shibboleth federated auth enabled.[/green]")
+
+    if set_carsi_disable:
+        cfg.carsi_enabled = False
+        changed = True
+        console.print("[yellow]CARSI auth disabled.[/yellow]")
+
+    if set_carsi_school:
+        cfg.carsi_idp_name = set_carsi_school
+        changed = True
+        console.print(f"[green]CARSI school set to: {set_carsi_school}[/green]")
+
+    if changed:
+        cfg.save()
+
+    has_setter = any([set_email, set_output, set_webvpn_url, set_school, set_proxy_url,
+                      set_elsevier_key, set_elsevier_token, set_flaresolverr,
+                      set_carsi_enable, set_carsi_disable, set_carsi_school])
+    if show and not has_setter:
+        # Determine school type
+        try:
+            from .schools import get_school as _get_school
+            school_entry = _get_school(cfg.school)
+            school_type = school_entry.school_type
+        except ValueError:
+            school_type = "unknown"
+
         console.print("[bold]Current configuration:[/bold]")
-        console.print(f"  School:         {cfg.school}")
-        console.print(f"  WebVPN base:    {cfg.webvpn_base_url}")
-        console.print(f"  Email:          {cfg.email}")
-        console.print(f"  Output dir:     {cfg.output_dir}")
-        console.print(f"  Cache dir:      {cfg.cache_dir}")
-        console.print(f"  Cookie path:    {cfg.cookie_path}")
+        console.print(f"  School:            {cfg.school} ({school_type})")
+        console.print(f"  WebVPN base:       {cfg.webvpn_base_url}")
+        console.print(f"  Proxy URL:         {cfg.proxy_url or '(not set)'}")
+        console.print(f"  Email:             {cfg.email}")
+        console.print(f"  Elsevier API key:  {'****' if cfg.elsevier_api_key else '(not set)'}")
+        console.print(f"  Elsevier inst tok: {'****' if cfg.elsevier_inst_token else '(not set)'}")
+        console.print(f"  FlareSolverr URL:  {cfg.flaresolverr_url}")
+        console.print(f"  CARSI enabled:     {'Yes' if cfg.carsi_enabled else 'No'}")
+        console.print(f"  CARSI school:      {cfg.carsi_idp_name or '(not set)'}")
+        console.print(f"  Output dir:        {cfg.output_dir}")
+        console.print(f"  Cache dir:         {cfg.cache_dir}")
+        console.print(f"  Cookie path:       {cfg.cookie_path}")
+
+
+@app.command()
+def carsi_login(
+    publisher: str = typer.Option("", "--publisher", "-p", help="Publisher (sciencedirect, springer, wiley, ieee, tandfonline, nature). Omit to pick from article URL."),
+    url: str = typer.Option("", "--url", "-u", help="Article URL to auto-detect publisher."),
+    force: bool = typer.Option(False, "--force", "-f", help="Force re-login."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose logging."),
+):
+    """Authenticate via CARSI/Shibboleth federated login."""
+    _setup_logging(verbose)
+    config = Config.load()
+
+    if not config.carsi_enabled:
+        console.print("[red]CARSI is not enabled. Run: vpnsci config-cmd --carsi-enable --carsi-school \"你的学校名\"[/red]")
+        raise typer.Exit(1)
+
+    if not config.carsi_idp_name:
+        console.print("[red]CARSI school not set. Run: vpnsci config-cmd --carsi-school \"你的学校名\"[/red]")
+        raise typer.Exit(1)
+
+    if not publisher and url:
+        from .carsi import detect_publisher
+        publisher = detect_publisher(url) or ""
+
+    if not publisher:
+        console.print("[yellow]Available publishers:[/yellow]")
+        console.print("  sciencedirect, springer, wiley, ieee, tandfonline, nature")
+        publisher = typer.prompt("Enter publisher name")
+
+    from .carsi import CARSIClient
+    carsi = CARSIClient(config)
+    try:
+        console.print(f"[bold]CARSI login for: {publisher}[/bold]")
+        console.print(f"[dim]School: {config.carsi_idp_name}[/dim]")
+        if carsi.login(publisher, force=force):
+            console.print("[green]CARSI session established![/green]")
+        else:
+            console.print("[red]CARSI login failed.[/red]")
+            raise typer.Exit(1)
+    finally:
+        carsi.close()
 
 
 if __name__ == "__main__":

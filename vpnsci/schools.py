@@ -9,16 +9,19 @@ WEBVPN_DEFAULT_KEY = _DEFAULT_KEY  # Public alias for CLI display
 
 _DATA_FILE = Path(__file__).parent / "data" / "webvpn.json"
 
+_schools_cache: list["SchoolEntry"] | None = None
+
 
 @dataclass
 class SchoolEntry:
-    """A university's WebVPN configuration."""
+    """A university's VPN configuration."""
 
-    name: str       # e.g. "清华大学"
-    province: str   # e.g. "北京"
-    host: str       # e.g. "https://webvpn.tsinghua.edu.cn"
-    key: bytes      # AES encryption key
-    iv: bytes       # AES encryption IV (often same as key)
+    name: str           # e.g. "清华大学"
+    province: str       # e.g. "北京"
+    host: str           # e.g. "https://webvpn.tsinghua.edu.cn"
+    key: bytes          # AES encryption key (WebVPN only)
+    iv: bytes           # AES encryption IV (WebVPN only)
+    school_type: str = "webvpn"  # "webvpn" or "easyconnect"
 
 
 def _load_db() -> dict:
@@ -38,17 +41,25 @@ def _parse_entry(name: str, province: str, info: dict) -> SchoolEntry | None:
     if not host.startswith("http"):
         host = f"https://{host}"
 
+    school_type = info.get("type", "webvpn")
+
     key_str = info.get("crypto_key", "")
     iv_str = info.get("crypto_iv", "")
 
     key = key_str.encode("utf-8") if key_str else _DEFAULT_KEY
     iv = iv_str.encode("utf-8") if iv_str else key
 
-    return SchoolEntry(name=name, province=province, host=host, key=key, iv=iv)
+    return SchoolEntry(
+        name=name, province=province, host=host,
+        key=key, iv=iv, school_type=school_type,
+    )
 
 
 def list_schools() -> list[SchoolEntry]:
-    """List all schools in the database."""
+    """List all schools in the database (cached)."""
+    global _schools_cache
+    if _schools_cache is not None:
+        return _schools_cache
     db = _load_db()
     result = []
     for province, schools in db.items():
@@ -56,6 +67,7 @@ def list_schools() -> list[SchoolEntry]:
             entry = _parse_entry(name, province, info)
             if entry:
                 result.append(entry)
+    _schools_cache = result
     return result
 
 
@@ -95,10 +107,11 @@ def get_school(name: str) -> SchoolEntry:
         matches.sort(key=lambda s: len(s.name))
         return matches[0]
 
-    # Fuzzy: query contains school name
-    for s in schools:
-        if s.name in name:
-            return s
+    # Fuzzy: query contains school name — return shortest (most specific) match
+    reverse_matches = [s for s in schools if s.name in name]
+    if reverse_matches:
+        reverse_matches.sort(key=lambda s: len(s.name))
+        return reverse_matches[0]
 
     raise ValueError(
         f"School not found: '{name}'. "

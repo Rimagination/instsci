@@ -56,6 +56,13 @@ class WebVPNAuth:
                     "Chrome/120.0.0.0 Safari/537.36"
                 )
             })
+            # Configure SOCKS5 proxy if set (for EasyConnect)
+            if self.config.proxy_url:
+                self._session.proxies = {
+                    "http": self.config.proxy_url,
+                    "https": self.config.proxy_url,
+                }
+                logger.info("Using proxy: %s", self.config.proxy_url)
         return self._session
 
     def convert_url(self, url: str) -> str:
@@ -93,10 +100,12 @@ class WebVPNAuth:
         return result
 
     def login(self, force: bool = False) -> bool:
-        """Ensure we have a valid WebVPN session.
+        """Ensure we have a valid session.
 
-        If cookies exist and are valid, reuses them.
-        Otherwise opens a browser for CAS login.
+        For EasyConnect (proxy_url set): no login needed, the SOCKS5 proxy
+        handles authentication at the network level via zju-connect.
+
+        For WebVPN: reuses saved cookies or opens browser for CAS login.
 
         Args:
             force: If True, ignore saved cookies and force re-login.
@@ -104,6 +113,11 @@ class WebVPNAuth:
         Returns:
             True if authentication succeeded.
         """
+        # EasyConnect mode: proxy handles auth, no login needed
+        if self.config.proxy_url:
+            logger.info("EasyConnect mode: proxy handles authentication, skipping login.")
+            return True
+
         if not force and self._try_load_cookies():
             logger.info("Loaded saved cookies - session is valid.")
             return True
@@ -252,11 +266,18 @@ class WebVPNAuth:
             self._driver = None
 
     def fetch(self, url: str, **kwargs) -> requests.Response:
-        """Fetch a URL through the WebVPN session.
+        """Fetch a URL through the WebVPN or proxy session.
 
-        Automatically converts to WebVPN URL if needed.
+        For WebVPN: converts URL and fetches via WebVPN.
+        For EasyConnect/proxy: fetches directly through SOCKS5 proxy.
         """
-        # Skip conversion if already a WebVPN URL
+        # If proxy is configured (EasyConnect mode), fetch directly
+        if self.config.proxy_url:
+            kwargs.setdefault("timeout", 30)
+            kwargs.setdefault("allow_redirects", True)
+            return self.session.get(url, **kwargs)
+
+        # WebVPN mode: convert URL
         if self._webvpn_base in url:
             proxied = url
         else:

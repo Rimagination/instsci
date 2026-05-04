@@ -1,0 +1,56 @@
+{
+  "sciencedirect": {
+    "name": "ScienceDirect (Elsevier)",
+    "domains": ["sciencedirect.com", "elsevier.com"],
+    "login_url": "https://www.sciencedirect.com/institutional-login",
+    "search_selector": "input#institution-search, input[placeholder*='institution'], input[placeholder*='机构']",
+    "result_selector": ".institution-list a, .search-results a, [data-testid='institution-result']",
+    "success_url_pattern": "sciencedirect.com",
+    "pdf_pattern": "/science/article/pii/{pii}/pdfft"
+  },
+  "springer": {
+    "name": "Springer Nature",
+    "domains": ["link.springer.com", "springer.com", "nature.com"],
+    "login_url": "https://link.springer.com/institutional-login",
+    "search_selector": "input#institution, input[name='institution'], input[placeholder*='institution']",
+    "result_selector": ".institution-list a, .search-result a, ul.institution-results a",
+    "success_url_pattern": "springer.com",
+    "pdf_pattern": "/content/pdf/{doi}.pdf"
+  },
+  "wiley": {
+    "name": "Wiley Online Library",
+    "domains": ["onlinelibrary.wiley.com"],
+    "login_url": "https://onlinelibrary.wiley.com/institutional-login",
+    "search_selector": "input#institution-search, input[name='institution']",
+    "result_selector": ".institution-results a, .search-results a",
+    "success_url_pattern": "wiley.com",
+    "pdf_pattern": "/doi/pdfdirect/{doi}"
+  },
+  "ieee": {
+    "name": "IEEE Xplore",
+    "domains": ["ieeexplore.ieee.org"],
+    "login_url": "https://ieeexplore.ieee.org/servlet/wayf.jsp",
+    "search_selector": "input#institution-search, input[name='searchTerm']",
+    "result_selector": ".institution-list a, .wayf-results a",
+    "success_url_pattern": "ieeexplore.ieee.org",
+    "pdf_pattern": "/stamp/stamp.jsp?arnumber={article_id}"
+  },
+  "tandfonline": {
+    "name": "Taylor & Francis",
+    "domains": ["tandfonline.com"],
+    "login_url": "https://www.tandfonline.com/institutional-login",
+    "search_selector": "input#institution, input[name='institution']",
+    "result_selector": ".institution-list a, .search-results a",
+    "success_url_pattern": "tandfonline.com",
+    "pdf_pattern": "/doi/pdf/{doi}?needAccess=true"
+  },
+  "nature": {
+    "name": "Nature",
+    "domains": ["nature.com"],
+    "login_url": "https://www.nature.com/institutional-login",
+    "search_selector": "input#institution, input[name='institution']",
+    "result_selector": ".institution-list a, .search-results a",
+    "success_url_pattern": "nature.com",
+    "pdf_pattern": "/articles/{doi_suffix}.pdf"
+  }
+}

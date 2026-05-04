@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 import requests
 
+from ..http_utils import request_with_retry
+
 logger = logging.getLogger(__name__)
 
 UNPAYWALL_API = "https://api.unpaywall.org/v2"
@@ -36,7 +38,7 @@ def check_oa(doi: str, email: str = "vpnsci@example.com") -> OAResult:
     """
     url = f"{UNPAYWALL_API}/{doi}?email={email}"
     try:
-        resp = requests.get(url, timeout=10)
+        resp = request_with_retry("GET", url, timeout=10)
         if resp.status_code == 404:
             logger.info("DOI %s not found in Unpaywall.", doi)
             return OAResult()

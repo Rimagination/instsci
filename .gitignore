@@ -39,6 +39,9 @@ desktop.ini
 cookies.json
 config.json
 chrome-profile/
+.chrome-sciencedirect/
+downloads/
+.tmp/
 
 # Testing / Coverage
 .coverage

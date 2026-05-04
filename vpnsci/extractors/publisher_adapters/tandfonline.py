@@ -1,4 +1,4 @@
-"""HTML extractor for ACS Publications articles."""
+"""HTML extractor for Taylor & Francis articles."""
 
 import re
 
@@ -7,11 +7,11 @@ from bs4 import BeautifulSoup
 
 def can_handle(url: str) -> bool:
     """Check if this adapter can handle the given URL."""
-    return "pubs.acs.org" in url.lower()
+    return "tandfonline.com" in url.lower()
 
 
 def extract(html: str, url: str = "") -> dict:
-    """Extract paper content from ACS Publications HTML."""
+    """Extract paper content from Taylor & Francis HTML."""
     soup = BeautifulSoup(html, "lxml")
 
     for tag in soup.find_all(["script", "style", "nav", "footer", "header"]):
@@ -29,8 +29,8 @@ def extract(html: str, url: str = "") -> dict:
 
 def _extract_title(soup: BeautifulSoup) -> str:
     for selector in [
-        "h1.article_header-title",
-        ".article-title",
+        "h1.article-header__title",
+        "h1.title",
         "meta[name='citation_title']",
         "meta[property='og:title']",
     ]:
@@ -43,36 +43,24 @@ def _extract_title(soup: BeautifulSoup) -> str:
 
 
 def _extract_authors(soup: BeautifulSoup) -> list[str]:
-    """Extract authors using meta tags first, then DOM."""
     authors = []
-    # Meta tags
     for meta in soup.select("meta[name='citation_author']"):
         name = meta.get("content", "").strip()
         if name:
             authors.append(name)
-    if authors:
-        return authors
-
-    # DOM selectors
-    for selector in [
-        ".loa li .hlFld-ContribAuthor",
-        ".contrib-group .contrib",
-        "a.author-name",
-    ]:
-        for el in soup.select(selector):
+    if not authors:
+        for el in soup.select(".contrib-group .contrib, .author-name, a.author"):
             name = el.get_text(strip=True)
-            if name:
+            if name and len(name) > 1:
                 authors.append(name)
-        if authors:
-            return authors
     return authors
 
 
 def _extract_abstract(soup: BeautifulSoup) -> str:
     for selector in [
-        "div.article_abstract-content",
-        "#abstractBox",
-        "p.articleBody_abstractText",
+        "div.abstract",
+        "div.abstractSection",
+        "#abstract",
         "meta[name='description']",
     ]:
         el = soup.select_one(selector)
@@ -86,26 +74,24 @@ def _extract_abstract(soup: BeautifulSoup) -> str:
 def _extract_body(soup: BeautifulSoup) -> str:
     parts = []
 
-    # ACS uses div.article_content with .NLM_sec sections
-    article_content = soup.select_one("div.article_content")
-    if article_content:
-        for section in article_content.select(".NLM_sec"):
+    body = soup.select_one("div.article-body") or soup.select_one("div.article_body")
+    if body:
+        for section in body.find_all(["section", "div"], recursive=False):
             heading = section.find(re.compile(r"h[2-4]"))
             heading_text = heading.get_text(strip=True) if heading else ""
             level = int(heading.name[1]) if heading else 2
 
-            if heading_text.lower() in ("abstract", "references", "supporting information"):
+            if heading_text.lower() in ("abstract", "references", "acknowledgments", "acknowledgements"):
                 continue
 
-            # Extract text and tables from section
             text_parts = []
             for child in section.children:
-                if child.name and child != heading:
+                if child.name:
                     if child.name == "table":
                         table_text = _extract_table(child)
                         if table_text:
                             text_parts.append(table_text)
-                    elif not child.select(".NLM_sec"):  # Skip nested sections
+                    else:
                         text = _clean(child.get_text())
                         if text:
                             text_parts.append(text)
@@ -117,20 +103,18 @@ def _extract_body(soup: BeautifulSoup) -> str:
             elif content:
                 parts.append(content)
 
-    if not parts and article_content:
-        parts.append(_clean(article_content.get_text()))
+    if not parts and body:
+        parts.append(_clean(body.get_text()))
 
-    # Fallback
     if not parts:
-        body = soup.select_one("article") or soup.select_one("#article-body")
-        if body:
-            parts.append(_clean(body.get_text()))
+        article = soup.select_one("article")
+        if article:
+            parts.append(_clean(article.get_text()))
 
     return "\n\n".join(parts)
 
 
 def _extract_table(table) -> str:
-    """Extract table content as structured text."""
     rows = []
     for tr in table.find_all("tr"):
         cells = []
@@ -143,8 +127,8 @@ def _extract_table(table) -> str:
 
 def _extract_figures(soup: BeautifulSoup) -> list[str]:
     captions = []
-    for fig in soup.select("figure, .article_figure"):
-        cap = fig.select_one("figcaption, .article_figure-caption")
+    for fig in soup.select("figure"):
+        cap = fig.select_one("figcaption")
         if cap:
             text = _clean(cap.get_text())
             if text and len(text) > 10:
@@ -154,12 +138,15 @@ def _extract_figures(soup: BeautifulSoup) -> list[str]:
 
 def _extract_references(soup: BeautifulSoup) -> list[str]:
     refs = []
-    ref_section = soup.select_one("#references") or soup.select_one(".article_references")
-    if ref_section:
-        for li in ref_section.find_all("li"):
-            text = _clean(li.get_text())
-            if text and len(text) > 20:
-                refs.append(text)
+    for selector in ["div.ref-list", "section.references", "#references", "div.references"]:
+        ref_section = soup.select_one(selector)
+        if ref_section:
+            for li in ref_section.find_all("li"):
+                text = _clean(li.get_text())
+                if text and len(text) > 20:
+                    refs.append(text)
+            if refs:
+                return refs
     return refs
 
 

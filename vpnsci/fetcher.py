@@ -12,6 +12,8 @@ from urllib.parse import urlparse
 import requests
 
 from .auth import WebVPNAuth
+from .http_utils import request_with_retry
+from .carsi import CARSIClient, detect_publisher
 from .config import Config
 from .extractors import html_extractor, pdf_extractor
 from .models import Paper
@@ -24,16 +26,6 @@ DOI_PATTERN = re.compile(r"^10\.\d{4,9}/[^\s]+$")
 # Minimum full_text length to consider a fetch "successful"
 MIN_FULLTEXT_LEN = 1000
 
-# ── Publisher PDF URL templates ──
-# Given a DOI like "10.1021/acsami.8b13329", construct direct PDF URL.
-PUBLISHER_PDF_TEMPLATES = {
-    "pubs.acs.org":             "https://pubs.acs.org/doi/pdf/{doi}",
-    "onlinelibrary.wiley.com":  "https://onlinelibrary.wiley.com/doi/pdfdirect/{doi}",
-    "pubs.rsc.org":             "https://pubs.rsc.org/en/content/articlepdf/{year}/{journal_code}/{doi_suffix}",
-    "www.tandfonline.com":      "https://www.tandfonline.com/doi/pdf/{doi}",
-    "www.nature.com":           "https://www.nature.com/articles/{doi_suffix}.pdf",
-    "link.springer.com":        "https://link.springer.com/content/pdf/{doi}.pdf",
-}
 
 
 class PaperFetcher:
@@ -43,6 +35,7 @@ class PaperFetcher:
         self.config = config or Config.load()
         self.config.ensure_dirs()
         self._auth: WebVPNAuth | None = None
+        self._carsi: CARSIClient | None = None
         self._last_request_time = 0.0
 
     @property
@@ -50,8 +43,21 @@ class PaperFetcher:
         if self._auth is None:
             from .schools import get_school
             entry = get_school(self.config.school)
+            # For EasyConnect, configure proxy if not already set
+            if entry.school_type == "easyconnect" and not self.config.proxy_url:
+                logger.warning(
+                    "School '%s' uses EasyConnect. Please configure proxy_url "
+                    "(e.g. socks5://127.0.0.1:1080) after connecting via zju-connect.",
+                    self.config.school,
+                )
             self._auth = WebVPNAuth(self.config, key=entry.key, iv=entry.iv)
         return self._auth
+
+    @property
+    def carsi(self) -> CARSIClient:
+        if self._carsi is None:
+            self._carsi = CARSIClient(self.config)
+        return self._carsi
 
     def fetch(self, identifier: str, use_cache: bool = True) -> Paper:
         """Fetch a paper by DOI or URL.
@@ -97,14 +103,26 @@ class PaperFetcher:
             logger.error("Could not determine URL for: %s", identifier)
             return paper
 
-        # Step 3: Try direct publisher PDF URL construction (before EZproxy HTML)
+        # Step 3: Try CARSI-authenticated publisher access (before WebVPN)
+        if self.config.carsi_enabled and doi:
+            carsi_paper = self._try_carsi_pdf(doi, url, paper)
+            if carsi_paper and len(carsi_paper.full_text or "") >= MIN_FULLTEXT_LEN:
+                self._save_cache(carsi_paper)
+                return carsi_paper
+            if self.config.carsi_enabled and url:
+                carsi_paper = self._try_carsi_html(url, paper)
+                if carsi_paper and len(carsi_paper.full_text or "") >= MIN_FULLTEXT_LEN:
+                    self._save_cache(carsi_paper)
+                    return carsi_paper
+
+        # Step 4: Try direct publisher PDF URL construction (before WebVPN HTML)
         if doi and not paper.pdf_path:
             pdf_paper = self._try_publisher_pdf(doi, url, paper)
             if pdf_paper and len(pdf_paper.full_text or "") >= MIN_FULLTEXT_LEN:
                 self._save_cache(pdf_paper)
                 return pdf_paper
 
-        # Step 4: Fetch via WebVPN
+        # Step 5: Fetch via WebVPN
         self._rate_limit()
         paper = self._fetch_via_webvpn(url, paper)
 
@@ -149,7 +167,7 @@ class PaperFetcher:
             paper.source = "open_access"
             self._rate_limit()
             try:
-                resp = requests.get(oa.pdf_url, timeout=60, stream=True)
+                resp = request_with_retry("GET", oa.pdf_url, timeout=60, stream=True)
                 resp.raise_for_status()
                 ct = resp.headers.get("content-type", "").lower()
                 if "pdf" in ct:
@@ -179,7 +197,7 @@ class PaperFetcher:
             paper.source = "open_access"
             self._rate_limit()
             try:
-                resp = requests.get(oa.html_url, timeout=30)
+                resp = request_with_retry("GET", oa.html_url, timeout=30)
                 resp.raise_for_status()
                 extracted = html_extractor.extract(resp.text, oa.html_url)
                 self._apply_extracted(paper, extracted)
@@ -198,7 +216,7 @@ class PaperFetcher:
                     logger.info("Found PDF link in OA HTML page: %s", pdf_url)
                     self._rate_limit()
                     try:
-                        pdf_resp = requests.get(pdf_url, timeout=60)
+                        pdf_resp = request_with_retry("GET", pdf_url, timeout=60)
                         pdf_resp.raise_for_status()
                         if "pdf" in pdf_resp.headers.get("content-type", "").lower():
                             pdf_bytes = pdf_resp.content
@@ -238,47 +256,43 @@ class PaperFetcher:
 
         return paper
 
-    def _try_publisher_pdf(self, doi: str, resolved_url: str, paper: Paper) -> Paper | None:
-        """Try to directly construct and download the publisher PDF URL.
+    @staticmethod
+    def _build_publisher_pdf_url(doi: str, resolved_url: str) -> str | None:
+        """Construct a direct PDF URL from known publisher patterns.
 
-        Many publishers have predictable PDF URL patterns.
-        We try these via WebVPN before falling back to HTML extraction.
+        Returns the PDF URL string, or None if the publisher is not recognized.
         """
         parsed = urlparse(resolved_url)
         hostname = parsed.netloc.lower()
-
-        # Determine which template to use
-        pdf_url = None
         doi_suffix = doi.split("/", 1)[-1] if "/" in doi else doi
 
         if "pubs.acs.org" in hostname:
-            pdf_url = f"https://pubs.acs.org/doi/pdf/{doi}"
+            return f"https://pubs.acs.org/doi/pdf/{doi}"
         elif "onlinelibrary.wiley.com" in hostname:
-            pdf_url = f"https://onlinelibrary.wiley.com/doi/pdfdirect/{doi}"
+            return f"https://onlinelibrary.wiley.com/doi/pdfdirect/{doi}"
         elif "tandfonline.com" in hostname:
-            pdf_url = f"https://www.tandfonline.com/doi/pdf/{doi}?needAccess=true"
+            return f"https://www.tandfonline.com/doi/pdf/{doi}?needAccess=true"
         elif "nature.com" in hostname:
-            pdf_url = f"https://www.nature.com/articles/{doi_suffix}.pdf"
+            return f"https://www.nature.com/articles/{doi_suffix}.pdf"
         elif "link.springer.com" in hostname:
-            pdf_url = f"https://link.springer.com/content/pdf/{doi}.pdf"
+            return f"https://link.springer.com/content/pdf/{doi}.pdf"
         elif "pubs.rsc.org" in hostname:
-            # RSC uses article-specific suffix, try the resolved URL pattern
             pdf_url = resolved_url.replace("/articlelanding/", "/articlepdf/")
-            if pdf_url == resolved_url:
-                pdf_url = None  # Pattern didn't match
+            return pdf_url if pdf_url != resolved_url else None
         elif "elsevier.com" in hostname or "sciencedirect.com" in hostname:
-            # Extract PII from URL (e.g. /retrieve/pii/S0929139300000676)
             pii_match = re.search(r"pii/([A-Z0-9]+)", resolved_url)
             if pii_match:
-                pii = pii_match.group(1)
-                pdf_url = f"https://www.sciencedirect.com/science/article/pii/{pii}/pdfft"
+                return f"https://www.sciencedirect.com/science/article/pii/{pii_match.group(1)}/pdfft"
+        return None
 
+    def _try_publisher_pdf(self, doi: str, resolved_url: str, paper: Paper) -> Paper | None:
+        """Try to directly construct and download the publisher PDF URL via WebVPN."""
+        pdf_url = self._build_publisher_pdf_url(doi, resolved_url)
         if not pdf_url:
             return None
 
         logger.info("Trying constructed publisher PDF URL: %s", pdf_url)
 
-        # Ensure authenticated
         if not self.auth.login():
             logger.error("Proxy authentication failed.")
             return None
@@ -311,6 +325,69 @@ class PaperFetcher:
         except requests.RequestException as e:
             logger.warning("Failed to fetch publisher PDF: %s", e)
 
+        return None
+
+    def _try_carsi_pdf(self, doi: str, resolved_url: str, paper: Paper) -> Paper | None:
+        """Try to download publisher PDF via CARSI-authenticated session."""
+        pdf_url = self._build_publisher_pdf_url(doi, resolved_url)
+        if not pdf_url:
+            return None
+
+        logger.info("Trying CARSI publisher PDF: %s", pdf_url)
+        self._rate_limit()
+        try:
+            resp = self.carsi.fetch(pdf_url)
+            resp.raise_for_status()
+            ct = resp.headers.get("content-type", "").lower()
+            if "pdf" in ct and len(resp.content) > 10000:
+                paper_copy = Paper(
+                    doi=paper.doi, title=paper.title, authors=paper.authors,
+                    journal=paper.journal, year=paper.year, abstract=paper.abstract,
+                    url=pdf_url,
+                )
+                paper_copy.full_text = pdf_extractor.extract_from_bytes(resp.content)
+                pdf_path = self._save_pdf(doi, resp.content)
+                paper_copy.pdf_path = str(pdf_path) if pdf_path else ""
+                paper_copy.source = "carsi"
+                logger.info("CARSI PDF downloaded (%d bytes)", len(resp.content))
+                return paper_copy
+        except requests.RequestException as e:
+            logger.warning("CARSI PDF failed: %s", e)
+        return None
+
+    def _try_carsi_html(self, url: str, paper: Paper) -> Paper | None:
+        """Try to fetch and extract content via CARSI-authenticated session."""
+        logger.info("Trying CARSI HTML: %s", url)
+        self._rate_limit()
+        try:
+            resp = self.carsi.fetch(url)
+            resp.raise_for_status()
+            ct = resp.headers.get("content-type", "").lower()
+            if "pdf" in ct:
+                paper_copy = Paper(
+                    doi=paper.doi, title=paper.title, authors=paper.authors,
+                    journal=paper.journal, year=paper.year, abstract=paper.abstract,
+                    url=url,
+                )
+                paper_copy.full_text = pdf_extractor.extract_from_bytes(resp.content)
+                pdf_path = self._save_pdf(paper.doi, resp.content) if paper.doi else None
+                paper_copy.pdf_path = str(pdf_path) if pdf_path else ""
+                paper_copy.source = "carsi"
+                return paper_copy
+
+            extracted = html_extractor.extract(resp.text, url)
+            paper_copy = Paper(
+                doi=paper.doi, title=paper.title, authors=paper.authors,
+                journal=paper.journal, year=paper.year, abstract=paper.abstract,
+                url=url,
+            )
+            self._apply_extracted(paper_copy, extracted)
+            paper_copy.source = "carsi"
+
+            if len(paper_copy.full_text or "") >= MIN_FULLTEXT_LEN:
+                return paper_copy
+        except requests.RequestException as e:
+            logger.warning("CARSI HTML failed: %s", e)
         return None
 
     def _fetch_via_webvpn(self, url: str, paper: Paper) -> Paper:
@@ -364,7 +441,87 @@ class PaperFetcher:
             except requests.RequestException as e:
                 logger.warning("Failed to download PDF: %s", e)
 
+        # Fallback 1: FlareSolverr if content is insufficient
+        if len(paper.full_text or "") < MIN_FULLTEXT_LEN:
+            fs_paper = self._try_flaresolverr(url, paper)
+            if fs_paper and len(fs_paper.full_text or "") >= MIN_FULLTEXT_LEN:
+                return fs_paper
+
+        # Fallback 2: Elsevier API for ScienceDirect papers
+        if (len(paper.full_text or "") < MIN_FULLTEXT_LEN
+                and paper.doi
+                and ("elsevier" in url.lower() or "sciencedirect" in url.lower())):
+            api_paper = self._try_elsevier_api(paper.doi, paper)
+            if api_paper and len(api_paper.full_text or "") >= MIN_FULLTEXT_LEN:
+                return api_paper
+
         return paper
+
+    def _try_flaresolverr(self, url: str, paper: Paper) -> Paper | None:
+        """Try fetching via FlareSolverr (bypasses Cloudflare)."""
+        from .flaresolverr import FlareSolverrClient
+
+        client = FlareSolverrClient(self.config.flaresolverr_url)
+        if not client.is_available():
+            logger.debug("FlareSolverr not available at %s", self.config.flaresolverr_url)
+            return None
+
+        logger.info("Trying FlareSolverr for %s", url)
+        html = client.get(url)
+        if not html:
+            return None
+
+        extracted = html_extractor.extract(html, url)
+        result = Paper(
+            doi=paper.doi,
+            url=paper.url,
+            source="webvpn+flaresolverr",
+        )
+        self._apply_extracted(result, extracted)
+        result.title = result.title or paper.title
+        result.authors = result.authors or paper.authors
+        result.abstract = result.abstract or paper.abstract
+
+        if len(result.full_text or "") >= MIN_FULLTEXT_LEN:
+            logger.info("FlareSolverr extraction successful (%d chars)", len(result.full_text or ""))
+            if result.doi:
+                self._save_cache(result)
+        return result
+
+    def _try_elsevier_api(self, doi: str, paper: Paper) -> Paper | None:
+        """Try fetching via Elsevier RetrievalAPI."""
+        from .sources import elsevier_api
+
+        api_key = elsevier_api.get_api_key(self.config.elsevier_api_key)
+        if not api_key:
+            logger.debug("No Elsevier API key configured")
+            return None
+
+        logger.info("Trying Elsevier API for %s", doi)
+        data = elsevier_api.fetch_fulltext(
+            doi,
+            api_key=api_key,
+            inst_token=self.config.elsevier_inst_token,
+        )
+        if not data:
+            return None
+
+        result = Paper(
+            doi=doi,
+            url=paper.url,
+            source="elsevier_api",
+            title=data.get("title", "") or paper.title,
+            authors=data.get("authors", []) or paper.authors,
+            abstract=data.get("abstract", "") or paper.abstract,
+            full_text=data.get("full_text", ""),
+            figures=data.get("figures", []),
+            references=data.get("references", []),
+        )
+
+        if len(result.full_text or "") >= MIN_FULLTEXT_LEN:
+            logger.info("Elsevier API extraction successful (%d chars)", len(result.full_text or ""))
+            self._save_cache(result)
+        return result
 
     def _apply_extracted(self, paper: Paper, extracted: dict):
         """Apply extracted content to a Paper object."""
@@ -491,7 +648,8 @@ class PaperFetcher:
     def _resolve_doi(self, doi: str) -> str | None:
         """Resolve a DOI to its target URL."""
         try:
-            resp = requests.get(
+            resp = request_with_retry(
+                "GET",
                 f"https://doi.org/{doi}",
                 allow_redirects=True,
                 timeout=15,
@@ -581,3 +739,5 @@ class PaperFetcher:
         """Clean up resources."""
         if self._auth:
             self._auth.close()
+        if self._carsi:
+            self._carsi.close()

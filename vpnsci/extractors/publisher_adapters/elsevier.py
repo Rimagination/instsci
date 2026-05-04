@@ -17,7 +17,7 @@ def extract(html: str, url: str = "") -> dict:
     """Extract paper content from Elsevier/ScienceDirect HTML."""
     soup = BeautifulSoup(html, "lxml")
 
-    for tag in soup.find_all(["script", "style", "nav"]):
+    for tag in soup.find_all(["script", "style", "nav", "footer", "header"]):
         tag.decompose()
 
     return {
@@ -35,6 +35,8 @@ def _extract_title(soup: BeautifulSoup) -> str:
         "span.title-text",
         "h1.article-header__title",
         "meta[name='citation_title']",
+        "meta[property='og:title']",
+        "meta[name='dc.title']",
     ]:
         el = soup.select_one(selector)
         if el:
@@ -45,16 +47,33 @@ def _extract_title(soup: BeautifulSoup) -> str:
 
 
 def _extract_authors(soup: BeautifulSoup) -> list[str]:
+    """Extract authors using meta tags first, then DOM."""
     authors = []
+    # Meta tags (most reliable for ScienceDirect)
     for meta in soup.select("meta[name='citation_author']"):
         name = meta.get("content", "").strip()
         if name:
             authors.append(name)
     if not authors:
-        for el in soup.select(".author-group .author span.content"):
+        for meta in soup.select("meta[name='dc.creator']"):
+            name = meta.get("content", "").strip()
+            if name:
+                authors.append(name)
+    if authors:
+        return authors
+
+    # DOM selectors
+    for selector in [
+        ".author-group .author span.content",
+        "a.author-name",
+        "[data-test='author-name']",
+    ]:
+        for el in soup.select(selector):
             name = el.get_text(strip=True)
             if name:
                 authors.append(name)
+        if authors:
+            return authors
     return authors
 
 
@@ -64,9 +83,13 @@ def _extract_abstract(soup: BeautifulSoup) -> str:
         "#abstracts",
         "div.Abstracts",
         "section#abstract",
+        "meta[name='description']",
+        "meta[property='og:description']",
     ]:
         el = soup.select_one(selector)
         if el:
+            if el.name == "meta":
+                return el.get("content", "").strip()
             return _clean(el.get_text())
     return ""
 
@@ -80,9 +103,28 @@ def _extract_body(soup: BeautifulSoup) -> str:
         for section in body.find_all("section", recursive=False):
             heading = section.find(re.compile(r"h[2-4]"))
             heading_text = heading.get_text(strip=True) if heading else ""
-            content = _clean(section.get_text())
+            level = int(heading.name[1]) if heading else 2
+
+            if heading_text.lower() in ("abstract", "references", "supplementary material"):
+                continue
+
+            # Extract text with tables
+            text_parts = []
+            for child in section.children:
+                if child.name:
+                    if child.name == "table":
+                        table_text = _extract_table(child)
+                        if table_text:
+                            text_parts.append(table_text)
+                    elif not child.find("section"):  # Skip nested sections
+                        text = _clean(child.get_text())
+                        if text:
+                            text_parts.append(text)
+
+            content = "\n\n".join(text_parts)
             if heading_text and content:
-                parts.append(f"## {heading_text}\n\n{content}")
+                prefix = "#" * min(level, 4)
+                parts.append(f"{prefix} {heading_text}\n\n{content}")
             elif content:
                 parts.append(content)
 
@@ -96,6 +138,18 @@ def _extract_body(soup: BeautifulSoup) -> str:
             parts.append(_clean(article.get_text()))
 
     return "\n\n".join(parts)
+
+
+def _extract_table(table) -> str:
+    """Extract table content as structured text."""
+    rows = []
+    for tr in table.find_all("tr"):
+        cells = []
+        for td in tr.find_all(["td", "th"]):
+            cells.append(_clean(td.get_text()))
+        if any(cells):
+            rows.append(" | ".join(cells))
+    return "\n".join(rows)
 
 
 def _extract_figures(soup: BeautifulSoup) -> list[str]:

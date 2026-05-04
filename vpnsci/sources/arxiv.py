@@ -6,6 +6,8 @@ import xml.etree.ElementTree as ET
 
 import requests
 
+from ..http_utils import request_with_retry
+
 logger = logging.getLogger(__name__)
 
 ARXIV_API = "http://export.arxiv.org/api/query"
@@ -50,7 +52,7 @@ def fetch_metadata(arxiv_id: str) -> dict:
     params = {"id_list": clean_id, "max_results": 1}
 
     try:
-        resp = requests.get(ARXIV_API, params=params, timeout=10)
+        resp = request_with_retry("GET", ARXIV_API, params=params, timeout=10)
         resp.raise_for_status()
     except requests.RequestException as e:
         logger.warning("arXiv API request failed for %s: %s", arxiv_id, e)
@@ -114,7 +116,7 @@ def download_pdf(arxiv_id: str, output_path: str) -> bool:
     """
     url = get_pdf_url(arxiv_id)
     try:
-        resp = requests.get(url, timeout=60, stream=True)
+        resp = request_with_retry("GET", url, timeout=60, stream=True)
         resp.raise_for_status()
         with open(output_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=8192):

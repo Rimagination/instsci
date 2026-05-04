@@ -14,13 +14,20 @@ DEFAULT_BASE_DIR = Path.home() / ".vpnsci"
 class Config:
     """VpnSci configuration."""
 
-    school: str = "清华大学"  # School name (use 'vpnsci schools' to list)
+    school: str = ""  # School name (use 'vpnsci schools' to list, or configure via MCP)
     webvpn_base_url: str = ""  # Auto-resolved from school if empty
+    proxy_url: str = ""  # SOCKS5 proxy for EasyConnect (e.g. socks5://127.0.0.1:1080)
     email: str = ""  # Set via 'vpnsci config-cmd --email your@email.com'
+    elsevier_api_key: str = ""  # Elsevier Developer Portal API key
+    elsevier_inst_token: str = ""  # Optional Elsevier institutional token
+    flaresolverr_url: str = "http://127.0.0.1:8191/v1"  # FlareSolverr service URL
     output_dir: str = ""
     cache_dir: str = ""
     cookie_path: str = ""
     chrome_profile_dir: str = ""
+    carsi_enabled: bool = False  # Enable CARSI/Shibboleth federated auth
+    carsi_idp_name: str = ""  # University name for CARSI WAYF (e.g. "中国海洋大学")
+    carsi_cookie_dir: str = ""  # Per-publisher CARSI cookies
     request_delay_min: float = 2.0
     request_delay_max: float = 5.0
 
@@ -34,6 +41,8 @@ class Config:
             self.cookie_path = str(base / "cookies.json")
         if not self.chrome_profile_dir:
             self.chrome_profile_dir = str(base / "chrome-profile")
+        if not self.carsi_cookie_dir:
+            self.carsi_cookie_dir = str(base / "carsi_cookies")
         # Auto-resolve webvpn_base_url from school if not set
         if not self.webvpn_base_url and self.school:
             try:
@@ -45,7 +54,7 @@ class Config:
 
     def ensure_dirs(self):
         """Create all necessary directories."""
-        for d in [self.output_dir, self.cache_dir, self.chrome_profile_dir]:
+        for d in [self.output_dir, self.cache_dir, self.chrome_profile_dir, self.carsi_cookie_dir]:
             Path(d).mkdir(parents=True, exist_ok=True)
         Path(self.cookie_path).parent.mkdir(parents=True, exist_ok=True)
 

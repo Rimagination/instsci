@@ -2,12 +2,12 @@
 
 import logging
 
-from .publisher_adapters import acs, elsevier, generic, nature, wiley
+from .publisher_adapters import acs, elsevier, generic, nature, rsc, tandfonline, wiley
 
 logger = logging.getLogger(__name__)
 
 # Ordered list of publisher adapters (checked in order)
-_ADAPTERS = [nature, elsevier, wiley, acs]
+_ADAPTERS = [nature, elsevier, wiley, acs, rsc, tandfonline]
 
 
 def extract(html: str, url: str = "") -> dict:

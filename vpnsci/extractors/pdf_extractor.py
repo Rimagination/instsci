@@ -126,6 +126,8 @@ def _clean_text(text: str) -> str:
     text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
     # Fix broken lines within paragraphs (single newline -> space)
     # But preserve double newlines (paragraph breaks)
+    _SENTENCE_ENDS = (".", ":", "?", "!", "。", "；", "！", "？")
+    _LIST_PREFIX = re.compile(r"^\s*(?:\d+[\.\)]\s|[-*•]\s)")
     lines = text.split("\n")
     result = []
     for i, line in enumerate(lines):
@@ -135,8 +137,10 @@ def _clean_text(text: str) -> str:
         elif (
             i + 1 < len(lines)
             and lines[i + 1].strip()
-            and not stripped.endswith((".", ":", "?", "!"))
-            and len(stripped) > 40
+            and not stripped.endswith(_SENTENCE_ENDS)
+            and len(stripped) > 20
+            and not _LIST_PREFIX.match(stripped)
+            and not _LIST_PREFIX.match(lines[i + 1].strip())
         ):
             result.append(stripped + " ")
         else:

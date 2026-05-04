@@ -105,11 +105,6 @@
     "厦门大学": {
       "host": "webvpn.xmu.edu.cn"
     },
-    "福建中医药大学": {
-      "host": "",
-      "crypto_key": "wrdvpnisthebest!",
-      "crypto_iv": "wrdvpnisthebest!"
-    },
     "福州大学": {
       "host": "webvpn.fzu.edu.cn"
     }
@@ -138,6 +133,14 @@
     }
   },
   "广东": {
+    "哈尔滨工业大学（深圳）": {
+      "host": "vpn.hitsz.edu.cn",
+      "type": "easyconnect"
+    },
+    "华南理工大学": {
+      "host": "scut.edu.cn",
+      "type": "easyconnect"
+    },
     "广州医科大学": {
       "host": "webvpn.gzhmu.edu.cn"
     },
@@ -282,6 +285,10 @@
     }
   },
   "江苏": {
+    "南京大学": {
+      "host": "vpn.nju.edu.cn",
+      "type": "easyconnect"
+    },
     "南京理工大学": {
       "host": "webvpn.njust.edu.cn",
       "crypto_key": "wrdvpnisthebest!",
@@ -383,6 +390,10 @@
     }
   },
   "山东": {
+    "中国海洋大学": {
+      "host": "vpn.ouc.edu.cn",
+      "type": "easyconnect"
+    },
     "山东外国语职业技术大学": {
       "host": "webvpn.swut.cn"
     },
@@ -436,6 +447,10 @@
     }
   },
   "上海": {
+    "上海第二工业大学": {
+      "host": "vpn.sspu.edu.cn",
+      "type": "easyconnect"
+    },
     "上海海事大学": {
       "host": "webvpn.shmtu.edu.cn",
       "crypto_key": "wrdvpnisthebest!",
@@ -541,6 +556,10 @@
     }
   },
   "浙江": {
+    "浙江大学": {
+      "host": "vpn.zju.edu.cn",
+      "type": "easyconnect"
+    },
     "温州医科大学": {
       "host": "webvpn.wmu.edu.cn"
     },
