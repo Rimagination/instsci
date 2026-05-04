@@ -135,11 +135,10 @@
   "广东": {
     "哈尔滨工业大学（深圳）": {
       "host": "vpn.hitsz.edu.cn",
-      "type": "easyconnect"
+      "type": "atrust"
     },
     "华南理工大学": {
-      "host": "scut.edu.cn",
-      "type": "easyconnect"
+      "host": "webvpn.scut.edu.cn"
     },
     "广州医科大学": {
       "host": "webvpn.gzhmu.edu.cn"
@@ -392,7 +391,8 @@
   "山东": {
     "中国海洋大学": {
       "host": "vpn.ouc.edu.cn",
-      "type": "easyconnect"
+      "type": "atrust",
+      "gateway": "otrust.ouc.edu.cn"
     },
     "山东外国语职业技术大学": {
       "host": "webvpn.swut.cn"

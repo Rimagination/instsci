@@ -34,7 +34,7 @@ pip install -e .
 
 ```bash
 # 1. 设置学校
-vpnsci config-cmd --school 清华大学
+vpnsci config-cmd --school 兰州大学
 
 # 2. 设置邮箱（Unpaywall OA 检测需要）
 vpnsci config-cmd --email your@email.com
@@ -44,6 +44,62 @@ vpnsci login
 
 # 4. 获取论文
 vpnsci fetch "10.1038/s41566-024-01234-5"
+```
+
+## VPN 类型说明
+
+不同高校使用不同的 VPN 系统，vpnsci 根据学校类型自动选择获取方式：
+
+| 类型 | 说明 | vpnsci 获取方式 |
+|------|------|----------------|
+| **WebVPN** | 网页反向代理，URL 改写（大多数高校） | 浏览器 CAS 登录后直接获取 |
+| **EasyConnect** | 深信服 SSL VPN 客户端（浙大、南大等） | 需要 SOCKS5 代理 |
+| **aTrust** | 深信服零信任 VPN（海大、哈工深等） | 需要 SOCKS5 代理 |
+
+### WebVPN 学校（直接使用）
+
+大部分学校属于 WebVPN 类型，直接使用即可：
+
+```bash
+vpnsci config-cmd --school 清华大学
+vpnsci login    # 浏览器弹出，完成 CAS 认证
+vpnsci fetch "10.1038/xxx"
+```
+
+### EasyConnect / aTrust 学校（需要代理）
+
+这类学校需要先建立 VPN 隧道，再通过 SOCKS5 代理获取论文。
+
+**方案一：docker-easyconnect（推荐，兼容性最好）**
+
+```bash
+# 1. 启动 Docker 容器
+docker run --rm -d --name easyconnect --privileged \
+  -p 127.0.0.1:1080:1080 -p 127.0.0.1:8888:8888 \
+  -e EC_VER=7.6.3 -e VPN_ADDR=vpn.ouc.edu.cn \
+  hagb/docker-easyconnect
+
+# 2. 浏览器打开 http://127.0.0.1:8888 完成登录
+
+# 3. 配置 vpnsci 使用代理
+vpnsci config-cmd --proxy-url socks5://127.0.0.1:1080
+
+# 4. 直接获取论文（无需再次登录）
+vpnsci fetch "10.1038/xxx"
+```
+
+> 将 `vpn.ouc.edu.cn` 替换为你学校的 VPN 地址。
+
+**方案二：zju-connect（轻量，仅限部分学校）**
+
+[zju-connect](https://github.com/mythologyli/zju-connect) 是 Go 语言实现的 EasyConnect 替代客户端，无需 Docker。但仅兼容部分学校的 EasyConnect 服务器（已知兼容：浙江大学）。
+
+```bash
+# 1. 下载并运行 zju-connect
+./zju-connect -server vpn.zju.edu.cn -username 学号 -password 密码 -disable-zju-config
+
+# 2. 配置 vpnsci
+vpnsci config-cmd --proxy-url socks5://127.0.0.1:1080
 ```
 
 ## CLI 用法
@@ -132,9 +188,10 @@ claude mcp add vpnsci -- vpnsci-mcp
 
 | 字段 | 说明 | 默认值 |
 |------|------|--------|
-| `school` | 学校名称 | `清华大学` |
-| `webvpn_base_url` | WebVPN 地址（自动从学校解析） | `""` |
+| `school` | 学校名称 | `""`（首次使用需配置） |
+| `webvpn_base_url` | WebVPN/VPN 地址（自动从学校解析） | `""` |
 | `email` | Unpaywall API 邮箱 | `""` |
+| `proxy_url` | SOCKS5 代理地址（EasyConnect/aTrust 学校使用） | `""` |
 | `output_dir` | PDF 保存目录 | `~/.vpnsci/papers` |
 | `cache_dir` | 缓存目录 | `~/.vpnsci/cache` |
 

@@ -21,7 +21,8 @@ class SchoolEntry:
     host: str           # e.g. "https://webvpn.tsinghua.edu.cn"
     key: bytes          # AES encryption key (WebVPN only)
     iv: bytes           # AES encryption IV (WebVPN only)
-    school_type: str = "webvpn"  # "webvpn" or "easyconnect"
+    school_type: str = "webvpn"  # "webvpn", "easyconnect", or "atrust"
+    gateway: str = ""   # EasyConnect/aTrust gateway domain (e.g. "otrust.ouc.edu.cn")
 
 
 def _load_db() -> dict:
@@ -49,9 +50,12 @@ def _parse_entry(name: str, province: str, info: dict) -> SchoolEntry | None:
     key = key_str.encode("utf-8") if key_str else _DEFAULT_KEY
     iv = iv_str.encode("utf-8") if iv_str else key
 
+    gateway = info.get("gateway", "")
+
     return SchoolEntry(
         name=name, province=province, host=host,
         key=key, iv=iv, school_type=school_type,
+        gateway=gateway,
     )
 
 

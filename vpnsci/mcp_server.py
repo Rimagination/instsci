@@ -80,11 +80,42 @@ async def configure_school(school_name: str) -> str:
     # Reset fetcher so it picks up the new config
     _reset_fetcher()
 
+    # Provide school-type-specific guidance
+    type_guidance = ""
+    if entry.school_type == "easyconnect":
+        type_guidance = (
+            "\n\n⚠️ **该校使用 EasyConnect VPN**，需要额外配置才能获取论文：\n"
+            "1. **推荐方案**：使用 [docker-easyconnect](https://github.com/Hagb/docker-easyconnect)\n"
+            "   ```bash\n"
+            "   docker run --rm -d --name easyconnect --privileged \\\n"
+            "     -p 127.0.0.1:1080:1080 -p 127.0.0.1:8888:8888 \\\n"
+            "     -e EC_VER=7.6.3 -e VPN_ADDR=<VPN地址> hagb/docker-easyconnect\n"
+            "   ```\n"
+            "2. 浏览器打开 `http://127.0.0.1:8888` 完成登录\n"
+            "3. 登录成功后设置代理：`vpnsci config-cmd --proxy-url socks5://127.0.0.1:1080`\n\n"
+            "部分学校也可尝试 [zju-connect](https://github.com/THU-wzj/zju-connect)（更轻量但兼容性有限）。"
+        )
+    elif entry.school_type == "atrust":
+        gateway = entry.gateway or entry.host.replace("https://", "").replace("http://", "")
+        type_guidance = (
+            f"\n\n⚠️ **该校使用 aTrust 零信任 VPN**，需要 Docker 方案：\n"
+            "1. 安装 Docker Desktop 并启动\n"
+            "2. 运行 docker-easyconnect（aTrust 模式）：\n"
+            "   ```bash\n"
+            "   docker run --rm -d --name easyconnect --privileged \\\n"
+            "     -p 127.0.0.1:1080:1080 -p 127.0.0.1:8888:8888 \\\n"
+            f"     -e EC_VER=7.6.3 -e VPN_ADDR={gateway} hagb/docker-easyconnect\n"
+            "   ```\n"
+            "3. 浏览器打开 `http://127.0.0.1:8888` 完成登录\n"
+            "4. 登录成功后设置代理：`vpnsci config-cmd --proxy-url socks5://127.0.0.1:1080`\n\n"
+            "注意：aTrust 不支持 zju-connect，必须使用 docker-easyconnect。"
+        )
+
     return (
         f"✅ 已配置为 **{entry.name}**（{entry.province}）\n"
-        f"WebVPN 地址: {entry.host}\n\n"
-        f"现在可以开始搜索和获取论文了。首次使用 WebVPN 获取付费论文时，"
-        f"会弹出浏览器让你完成校园网登录认证。"
+        f"VPN 地址: {entry.host}\n"
+        f"类型: {entry.school_type}{type_guidance}\n\n"
+        f"现在可以开始搜索和获取论文了。"
     )
 
 
