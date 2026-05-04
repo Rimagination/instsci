@@ -2,7 +2,10 @@
 
 学术论文全文获取工具，支持 100+ 中国高校。通过 MCP 协议接入 AI Agent，用自然语言搜索和获取论文。
 
-**获取原理**：优先从免费来源（Unpaywall、arXiv）获取全文；找不到时通过学校 WebVPN、EZproxy 或 VPN 代理访问机构订阅资源；最后回退到 Semantic Scholar 获取元数据。
+**获取原理**：
+1. 先找免费来源（Unpaywall、arXiv）
+2. 找不到则通过学校代理访问机构订阅资源（支持 WebVPN、EZproxy、EasyConnect、aTrust 四种方式）
+3. 都不行则返回元数据（标题、摘要、引用数）
 
 ## 使用方式
 
