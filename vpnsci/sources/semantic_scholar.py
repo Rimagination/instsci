@@ -13,11 +13,15 @@ S2_FIELDS = "title,authors,year,abstract,externalIds,journal,citationCount,url"
 MAX_RETRIES = 3
 
 
+_SSL_VERIFY = not (os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or
+                   os.environ.get("http_proxy") or os.environ.get("https_proxy"))
+
+
 def _request_with_retry(url: str, params: dict) -> dict | None:
     """Make a GET request with retry on 429 rate limit."""
     for attempt in range(MAX_RETRIES):
         try:
-            resp = requests.get(url, params=params, timeout=15)
+            resp = requests.get(url, params=params, timeout=15, verify=_SSL_VERIFY)
             if resp.status_code == 404:
                 return None
             if resp.status_code == 429:

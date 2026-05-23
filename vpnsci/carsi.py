@@ -77,6 +77,11 @@ class CARSIClient:
                     "Chrome/120.0.0.0 Safari/537.36"
                 )
             })
+            # Auto-detect proxy and disable SSL verification if behind a proxy
+            import os
+            if os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or \
+               os.environ.get("http_proxy") or os.environ.get("https_proxy"):
+                sess.verify = False
             self._sessions[publisher] = sess
         return self._sessions[publisher]
 

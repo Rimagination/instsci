@@ -3,6 +3,7 @@
 import binascii
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -52,6 +53,16 @@ class WebVPNAuth:
         self._webvpn_base = self.config.webvpn_base_url.rstrip("/")
 
     @property
+    def browser_context(self):
+        """Get the live CloakBrowser context (if browser session is active)."""
+        return self._context
+
+    @property
+    def browser_page(self):
+        """Get the live CloakBrowser page (the one with the active WebVPN session)."""
+        return self._page
+
+    @property
     def session(self) -> requests.Session:
         """Get an authenticated requests session."""
         if self._session is None:
@@ -63,6 +74,10 @@ class WebVPNAuth:
                     "Chrome/120.0.0.0 Safari/537.36"
                 )
             })
+            # Auto-detect proxy and disable SSL verification if behind a proxy
+            if os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or \
+               os.environ.get("http_proxy") or os.environ.get("https_proxy"):
+                self._session.verify = False
             # Configure SOCKS5 proxy if set (for EasyConnect)
             if self.config.proxy_url:
                 self._session.proxies = {
@@ -199,23 +214,59 @@ class WebVPNAuth:
         return False
 
     def _browser_login(self) -> bool:
-        """Open CloakBrowser for manual login via WebVPN or EasyConnect portal."""
+        """Open CloakBrowser for manual login via WebVPN or EasyConnect portal.
+
+        Uses a persistent browser context so the session survives across runs.
+        After the first login, subsequent runs reuse the existing browser profile
+        with WebVPN session intact — no re-login needed.
+        """
         if not _HAS_CLOAKBROWSER:
             logger.error("cloakbrowser not installed. Run: pip install cloakbrowser")
             return False
 
         try:
-            self._browser = launch(
+            # Use persistent context to keep WebVPN session alive across runs
+            from cloakbrowser import launch_persistent_context
+            profile_dir = self.config.chrome_profile_dir
+            Path(profile_dir).mkdir(parents=True, exist_ok=True)
+            self._context = launch_persistent_context(
+                user_data_dir=profile_dir,
                 headless=False, humanize=True,
                 args=["--disable-features=CrossOriginOpenerPolicy"],
             )
-            self._context = self._browser.new_context()
+            self._browser = None  # persistent context manages its own browser
             self._page = self._context.new_page()
         except Exception as e:
             logger.error("Failed to start CloakBrowser: %s", e)
             return False
 
-        # Navigate to login page
+        # Test if persistent context has a valid session by navigating to WebVPN base
+        # (just having cookies is not enough — WebVPN sessions are tied to TLS state)
+        # Use networkidle to wait for all CAS redirects to complete
+        self._page.goto(self._webvpn_base, wait_until="networkidle", timeout=30000)
+        current_url = self._page.url
+        logger.info("Session test: navigated to WebVPN base, landed on %s", current_url[:80])
+
+        # Check if we're on CAS/IdP (session invalid) or on the gateway (session valid)
+        parsed = urlparse(current_url)
+        url_host = (parsed.hostname or "").lower()
+        on_login_page = (
+            "cas" in current_url.lower()
+            or "login" in current_url.lower()
+            or "/oauth/" in current_url.lower()
+            or "/sso/" in current_url.lower()
+            or "/wayf" in current_url.lower()
+            or "/shibboleth" in current_url.lower()
+        )
+        is_idp = "id.tsinghua" in url_host or "idp." in url_host or "auth." in url_host
+
+        if not on_login_page and not is_idp:
+            logger.info("Persistent context has valid session! URL=%s", current_url[:60])
+            self._save_browser_cookies()
+            return True
+
+        # Session invalid — need to log in
+        # Navigate to WebVPN base for login prompt
         self._page.goto(self._webvpn_base, wait_until="domcontentloaded")
 
         print("\n" + "=" * 60)
@@ -250,6 +301,7 @@ class WebVPNAuth:
                     last_url = current_url
 
                 # Detection 1: WebVPN session cookie (WebVPN schools)
+                # This cookie appears after CAS SSO completes and redirects back
                 cookies = self._context.cookies()
                 vpn_cookies = [
                     c for c in cookies
@@ -257,25 +309,36 @@ class WebVPNAuth:
                     and c.get("name", "").startswith("wengine_vpn_ticket")
                 ]
                 if vpn_cookies:
-                    logger.info("Login detected via WebVPN session cookie.")
-                    self._save_browser_cookies()
-                    print("\n  Login successful! Cookies saved.\n")
-                    self._close_browser()
-                    return True
+                    # Check if we're back on the WebVPN gateway (not still on CAS)
+                    parsed_url = urlparse(current_url)
+                    url_host = (parsed_url.hostname or "").lower()
+                    on_webvpn = url_host and "webvpn" in url_host
+                    if on_webvpn:
+                        logger.info("Login confirmed! VPN cookie + on gateway. URL=%s", current_url[:60])
+                        self._save_browser_cookies()
+                        print("\n  Login successful! Cookies saved. Browser kept alive for PDF download.\n")
+                        return True
 
                 # Detection 2: URL left login/CAS page (works for both WebVPN and EasyConnect)
-                on_login_page = "/login" in current_url.lower() or "cas" in current_url.lower()
-                is_gateway = (
-                    self._webvpn_base in current_url
-                    or "otrust" in current_url.lower()
-                    or "/portal/" in current_url.lower()
+                on_login_page = (
+                    "/login" in current_url.lower()
+                    or "cas" in current_url.lower()
+                    or "/oauth/" in current_url.lower()
+                    or "/sso/" in current_url.lower()
+                    or "/wayf" in current_url.lower()
+                    or "/shibboleth" in current_url.lower()
                 )
-                if is_gateway and not on_login_page:
-                    logger.info("Login detected! URL: %s", current_url)
-                    self._save_browser_cookies()
-                    print("\n  Login successful! Cookies saved.\n")
-                    self._close_browser()
-                    return True
+                if not on_login_page:
+                    is_gateway = (
+                        self._webvpn_base in current_url
+                        or "otrust" in current_url.lower()
+                        or "/portal/" in current_url.lower()
+                    )
+                    if is_gateway:
+                        logger.info("Login detected via URL! (url=%s)", current_url[:60])
+                        self._save_browser_cookies()
+                        print("\n  Login successful! Cookies saved. Browser kept alive for PDF download.\n")
+                        return True
 
             except Exception:
                 logger.warning("Browser connection lost.")
@@ -294,6 +357,10 @@ class WebVPNAuth:
             return
 
         cookies = self._context.cookies()
+        # Normalize expires values: -1 (session) → 0
+        for c in cookies:
+            if c.get("expires", 0) < 0:
+                c["expires"] = 0
         cookie_path = Path(self.config.cookie_path)
         cookie_path.write_text(
             json.dumps(cookies, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -311,14 +378,19 @@ class WebVPNAuth:
 
     def _close_browser(self):
         """Close the CloakBrowser."""
+        if self._context:
+            try:
+                self._context.close()
+            except Exception:
+                pass
         if self._browser:
             try:
                 self._browser.close()
             except Exception:
                 pass
-            self._browser = None
-            self._context = None
-            self._page = None
+        self._browser = None
+        self._context = None
+        self._page = None
 
     def fetch(self, url: str, **kwargs) -> requests.Response:
         """Fetch a URL through the WebVPN, EasyConnect, or proxy session.
@@ -370,6 +442,11 @@ class EZProxyAuth:
         self._browser = None
         self._context = None
         self._page = None
+
+    @property
+    def browser_context(self):
+        """Get the live CloakBrowser context (if browser session is active)."""
+        return self._context
 
     @property
     def session(self) -> requests.Session:
@@ -478,8 +555,7 @@ class EZProxyAuth:
                 if not on_login and self._proxy_base not in current_url:
                     logger.info("EZproxy login detected! URL: %s", current_url)
                     self._save_browser_cookies()
-                    print("\n  Login successful! Cookies saved.\n")
-                    self._close_browser()
+                    print("\n  Login successful! Cookies saved. Browser kept alive for PDF download.\n")
                     return True
 
             except Exception:

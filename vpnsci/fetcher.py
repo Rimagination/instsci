@@ -20,10 +20,9 @@ from .models import Paper
 from .sources import arxiv, unpaywall
 
 try:
-    from cloakbrowser import launch as _cb_launch
+    import cloakbrowser  # noqa: F401 — check availability
     _HAS_CLOAKBROWSER = True
 except ImportError:
-    _cb_launch = None  # type: ignore[assignment]
     _HAS_CLOAKBROWSER = False
 
 logger = logging.getLogger(__name__)
@@ -341,8 +340,8 @@ class PaperFetcher:
         """Try to download PDF via CloakBrowser (bypasses TLS fingerprint detection).
 
         Publishers like PNAS, Elsevier, Wiley detect TLS fingerprints and return 403
-        for Python HTTP clients even with valid cookies. This method uses a real browser
-        to download the PDF.
+        for Python HTTP clients even with valid cookies. This method uses a browser
+        to directly navigate to the PDF URL.
         """
         if not _HAS_CLOAKBROWSER:
             return None
@@ -351,120 +350,293 @@ class PaperFetcher:
         if not pdf_url:
             return None
 
-        logger.info("Trying browser PDF download: %s", pdf_url)
-        print(f"  [Browser] Downloading PDF via browser to bypass TLS fingerprinting...")
+        # Use the article URL (not PDF URL) — navigate to article page,
+        # then use in-browser fetch() for PDF (avoids Cloudflare on direct PDF URLs).
+        print("  [Browser] Downloading PDF via browser...")
 
-        browser = None
-        try:
-            browser = _cb_launch(
-                headless=False, humanize=True,
-                args=["--disable-features=CrossOriginOpenerPolicy"],
-            )
-            context = browser.new_context()
+        # Try reusing the live browser context from WebVPN login first
+        live_context = getattr(self.auth, 'browser_context', None)
+        if live_context:
+            result = self._browser_pdf_download(live_context, resolved_url, doi, paper)
+            if result:
+                return result
 
-            # Load saved cookies into browser context
-            self._load_cookies_to_context(context)
-
-            page = context.new_page()
-
-            # Capture PDF from network responses
-            captured_pdf: list[bytes] = []
-
-            def on_response(response):
-                try:
-                    ct = response.headers.get("content-type", "").lower()
-                    url = response.url
-                    is_pdf_ct = "pdf" in ct or "octet-stream" in ct
-                    is_pdf_url = url.lower().endswith(".pdf") or "/pdfdirect/" in url or "/doi/pdf/" in url
-                    if not (is_pdf_ct or is_pdf_url):
-                        return
-                    if response.status >= 400:
-                        return
-                    body = response.body()
-                    if len(body) > 5000 and body[:4] == b"%PDF-":
-                        captured_pdf.append(body)
-                        logger.info("Browser captured PDF: %d bytes from %s", len(body), url[:60])
-                except Exception:
-                    pass
-
-            page.on("response", on_response)
-
-            # Navigate to PDF URL
-            try:
-                page.goto(pdf_url, wait_until="commit", timeout=30000)
-            except Exception:
-                pass
-
-            # Wait a bit for responses to arrive
-            time.sleep(3)
-
-            # Check captured PDF
-            if captured_pdf:
-                pdf_bytes = captured_pdf[-1]
-                paper.full_text = pdf_extractor.extract_from_bytes(pdf_bytes)
-                pdf_path = self._save_pdf(doi, pdf_bytes)
-                paper.pdf_path = str(pdf_path) if pdf_path else ""
-                paper.source = "browser"
-                logger.info("Browser PDF downloaded (%d bytes)", len(pdf_bytes))
-                return paper
-
-            # Try expect_download as fallback
-            try:
-                with page.expect_download(timeout=15000) as download_info:
-                    page.goto(pdf_url, wait_until="commit", timeout=15000)
-                download = download_info.value
-                tmp = download.path()
-                if tmp:
-                    pdf_bytes = tmp.read_bytes()
-                    if pdf_bytes[:4] == b"%PDF-" and len(pdf_bytes) > 5000:
-                        paper.full_text = pdf_extractor.extract_from_bytes(pdf_bytes)
-                        pdf_path = self._save_pdf(doi, pdf_bytes)
-                        paper.pdf_path = str(pdf_path) if pdf_path else ""
-                        paper.source = "browser"
-                        logger.info("Browser PDF downloaded via download event (%d bytes)", len(pdf_bytes))
-                        return paper
-            except Exception:
-                pass
-
-        except Exception as e:
-            logger.warning("Browser PDF download failed: %s", e)
-        finally:
-            if browser:
-                try:
-                    browser.close()
-                except Exception:
-                    pass
+        # No live context — need to trigger browser login first
+        # Use force=True to bypass cookie check and actually launch a browser.
+        logger.info("No live browser session. Triggering browser login for PDF download...")
+        if self.auth.login(force=True):
+            live_context = getattr(self.auth, 'browser_context', None)
+            if live_context:
+                result = self._browser_pdf_download(live_context, resolved_url, doi, paper)
+                if result:
+                    return result
 
         return None
 
-    def _load_cookies_to_context(self, context) -> None:
-        """Load saved cookies (WebVPN + CARSI) into a CloakBrowser context."""
-        import json as _json
+    def _browser_pdf_download(self, context, article_url: str, doi: str, paper: Paper) -> Paper | None:
+        """Download PDF via browser navigation with response capture.
 
-        # Load WebVPN cookies
-        cookie_path = Path(self.config.cookie_path)
-        if cookie_path.exists():
+        page.goto() is a real browser navigation — ScienceDirect treats it as
+        a legitimate user action, unlike JavaScript fetch() which triggers
+        anti-bot ("Are you a robot?") detection.
+        """
+        # Always create a fresh page to avoid stale state from previous attempts
+        # (e.g., stuck on Cloudflare challenge, PDF viewer, or error page)
+        page = context.new_page()
+
+        try:
+            return self._browser_pdf_do(page, article_url, doi, paper)
+        finally:
             try:
-                cookies = _json.loads(cookie_path.read_text(encoding="utf-8"))
-                pw_cookies = []
-                for c in cookies:
-                    pw_c = {
-                        "name": c["name"],
-                        "value": c["value"],
-                        "domain": c.get("domain", ""),
-                        "path": c.get("path", "/"),
+                page.close()
+            except Exception:
+                pass
+
+    def _browser_pdf_do(self, page, article_url: str, doi: str, paper: Paper) -> Paper | None:
+        """Inner implementation — page lifecycle managed by caller."""
+        # Build proxied article URL (not PDF URL — avoid triggering Cloudflare)
+        try:
+            proxied_article = self.auth.convert_url(article_url)
+        except Exception:
+            proxied_article = article_url
+
+        logger.info("Browser: navigating to article page %s", proxied_article[:80])
+        try:
+            page.goto(proxied_article, wait_until="domcontentloaded", timeout=60000)
+        except Exception as e:
+            logger.warning("Navigation failed: %s", e)
+
+        # Wait for Cloudflare challenge to resolve (scansci-pdf pattern: 6×5s)
+        for i in range(6):
+            title = page.title().lower()
+            if any(sig in title for sig in ("请稍候", "just a moment", "attention required",
+                                             "verify", "security check")):
+                logger.info("Cloudflare challenge detected, waiting... (%d/6)", i + 1)
+                time.sleep(5)
+            else:
+                break
+
+        current_url = page.url
+        current_title = page.title()
+        logger.info("Browser article page: url=%s, title=%s", current_url[:60], current_title[:40])
+
+        # Check CAS redirect
+        if "cas" in current_url.lower() or "login" in current_url.lower() or \
+           "登录" in current_title or "身份" in current_title:
+            logger.info("Browser landed on CAS page")
+            return None
+
+        # Handle linkinghub.elsevier.com redirect → wait for ScienceDirect
+        if "linkinghub" in current_url or "retrieve/pii" in current_url:
+            logger.info("On linkinghub redirect page, waiting for redirect...")
+            time.sleep(5)
+            current_url = page.url
+            # If still on linkinghub, navigate directly to ScienceDirect
+            if "linkinghub" in current_url:
+                pii_match = re.search(r"pii/([A-Z0-9]+)", current_url)
+                if pii_match:
+                    direct_url = f"https://www.sciencedirect.com/science/article/pii/{pii_match.group(1)}"
+                    try:
+                        proxied_direct = self.auth.convert_url(direct_url)
+                    except Exception:
+                        proxied_direct = direct_url
+                    logger.info("Redirecting manually to: %s", proxied_direct[:80])
+                    try:
+                        page.goto(proxied_direct, wait_until="domcontentloaded", timeout=30000)
+                        time.sleep(3)
+                    except Exception:
+                        pass
+                    # Wait for Cloudflare again
+                    for i in range(6):
+                        title = page.title().lower()
+                        if any(sig in title for sig in ("请稍候", "just a moment", "attention required", "verify")):
+                            logger.info("Cloudflare challenge, waiting... (%d/6)", i + 1)
+                            time.sleep(5)
+                        else:
+                            break
+                    current_url = page.url
+
+        # Wait for page to fully load (avoid Execution context destroyed)
+        try:
+            page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
+
+        logger.info("Final article page: url=%s, title=%s", current_url[:60], page.title()[:40])
+
+        # Strategy: Find PDF link on page, then navigate to it with response capture.
+        # page.goto() is a real browser navigation — ScienceDirect treats it as a legitimate
+        # user action, unlike JavaScript fetch() which triggers anti-bot detection.
+        pdf_link = page.evaluate("""
+            (() => {
+                // 1. Check meta tag (most reliable)
+                for (const meta of document.querySelectorAll('meta[name="citation_pdf_url"]')) {
+                    if (meta.content) return meta.content;
+                }
+                // 2. Check links with PDF-related attributes
+                for (const a of document.querySelectorAll('a[aria-label*="PDF" i], a[title*="PDF" i]')) {
+                    if (a.href) return a.href;
+                }
+                // 3. Check links by href pattern
+                for (const a of document.querySelectorAll('a')) {
+                    const href = (a.href || '').toLowerCase();
+                    const text = (a.textContent || '').toLowerCase();
+                    if (href.includes('/pdfft') || href.includes('/pdfdirect')) {
+                        return a.href;
                     }
-                    if c.get("secure"):
-                        pw_c["secure"] = True
-                    if c.get("httpOnly"):
-                        pw_c["httpOnly"] = True
-                    if pw_c["domain"]:
-                        pw_cookies.append(pw_c)
-                if pw_cookies:
-                    context.add_cookies(pw_cookies)
-                    logger.info("Loaded %d WebVPN cookies into browser", len(pw_cookies))
+                    if (href.includes('pdf') && !href.includes('supplement') && !href.includes('cite')) {
+                        return a.href;
+                    }
+                    if (text.includes('pdf') && (text.includes('download') || text.includes('view'))) {
+                        return a.href;
+                    }
+                }
+                return null;
+            })()
+        """)
+
+        if not pdf_link or not isinstance(pdf_link, str):
+            logger.info("No PDF link found on article page")
+            return None
+
+        logger.info("Found PDF link on page: %s", pdf_link[:80])
+
+        # Build the full PDF URL (may be relative)
+        if pdf_link.startswith("/"):
+            from urllib.parse import urlparse
+            parsed = urlparse(current_url)
+            pdf_link = f"{parsed.scheme}://{parsed.netloc}{pdf_link}"
+
+        # Capture PDF response during navigation
+        captured_pdf = {"bytes": None}
+
+        def _on_response(response):
+            try:
+                ct = response.headers.get("content-type", "")
+                if "pdf" in ct or "octet" in ct:
+                    body = response.body()
+                    if body[:5] == b"%PDF-":
+                        captured_pdf["bytes"] = body
+            except Exception:
+                pass
+
+        page.on("response", _on_response)
+
+        # Also try direct navigation to known PDF paths
+        pdf_paths = self._build_browser_pdf_paths(doi, current_url)
+
+        # Combine: try the discovered link first, then known paths
+        all_urls = [pdf_link]
+        from urllib.parse import urlparse as _urlparse
+        _parsed = _urlparse(current_url)
+        _origin = f"{_parsed.scheme}://{_parsed.netloc}"
+        for p in pdf_paths:
+            full = _origin + p if p.startswith("/") else p
+            if full not in all_urls:
+                all_urls.append(full)
+
+        for pdf_url in all_urls:
+            if captured_pdf["bytes"]:
+                break
+            logger.info("Navigating to PDF URL: %s", pdf_url[:80])
+            try:
+                page.goto(pdf_url, wait_until="domcontentloaded", timeout=30000)
             except Exception as e:
-                logger.warning("Failed to load cookies into browser: %s", e)
+                logger.debug("Navigation to %s failed: %s", pdf_url[:60], e)
+                continue
+
+            # Wait for Cloudflare if needed
+            for i in range(4):
+                title = page.title().lower()
+                if any(sig in title for sig in ("请稍候", "just a moment", "attention required", "verify")):
+                    logger.info("Cloudflare on PDF page, waiting... (%d/6)", i + 1)
+                    time.sleep(5)
+                else:
+                    break
+
+            # Check if the page itself is a PDF (embedded viewer)
+            if not captured_pdf["bytes"]:
+                try:
+                    page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
+                # Try to extract PDF from embedded viewer (ScienceDirect uses object/embed)
+                try:
+                    pdf_from_viewer = page.evaluate("""
+                        () => {
+                            // Check for embedded PDF viewer
+                            const obj = document.querySelector('object[type="application/pdf"]');
+                            if (obj && obj.data) return obj.data;
+                            const embed = document.querySelector('embed[type="application/pdf"]');
+                            if (embed && embed.src) return embed.src;
+                            const iframe = document.querySelector('iframe[src*="pdf"]');
+                            if (iframe && iframe.src) return iframe.src;
+                            return null;
+                        }
+                    """)
+                    if pdf_from_viewer and isinstance(pdf_from_viewer, str):
+                        logger.info("Found PDF in embedded viewer: %s", pdf_from_viewer[:80])
+                        # Navigate to the embedded PDF URL
+                        if pdf_from_viewer.startswith("/"):
+                            pdf_from_viewer = _origin + pdf_from_viewer
+                        try:
+                            page.goto(pdf_from_viewer, wait_until="domcontentloaded", timeout=30000)
+                            time.sleep(2)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            # If Cloudflare cleared but we're on a non-PDF page, check the URL
+            if not captured_pdf["bytes"]:
+                final_url = page.url
+                final_title = page.title().lower()
+                logger.info("After navigation: url=%s, title=%s", final_url[:60], final_title[:40])
+                # If we landed on "Are you a robot?" or error page, skip
+                if "robot" in final_title or "captcha" in final_title:
+                    logger.warning("Anti-bot detected on PDF page, trying next URL")
+                    continue
+
+        page.remove_listener("response", _on_response)
+
+        pdf_bytes = captured_pdf["bytes"]
+        if pdf_bytes and pdf_bytes[:5] == b"%PDF-" and len(pdf_bytes) > 5000:
+            paper.full_text = pdf_extractor.extract_from_bytes(pdf_bytes)
+            pdf_path = self._save_pdf(doi, pdf_bytes)
+            paper.pdf_path = str(pdf_path) if pdf_path else ""
+            paper.source = "browser"
+            logger.info("Browser PDF downloaded via response capture (%d bytes)", len(pdf_bytes))
+            return paper
+
+        logger.info("Could not capture PDF from browser navigation")
+        return None
+
+    @staticmethod
+    def _build_browser_pdf_paths(doi: str, current_url: str) -> list[str]:
+        """Build PDF fetch paths relative to current origin (for in-browser fetch)."""
+        from urllib.parse import urlparse
+        parsed = urlparse(current_url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        doi_suffix = doi.split("/", 1)[-1] if "/" in doi else doi
+
+        paths = []
+        # Elsevier/ScienceDirect paths
+        if "sciencedirect" in parsed.netloc or "elsevier" in parsed.netloc:
+            pii_match = re.search(r"pii/([A-Z0-9]+)", current_url)
+            if pii_match:
+                pii = pii_match.group(1)
+                paths.append(f"/science/article/pii/{pii}/pdfft")
+            paths.append(f"/doi/pdfdirect/{doi}")
+        # Springer
+        elif "springer" in parsed.netloc:
+            paths.append(f"/content/pdf/{doi}.pdf")
+        # Wiley
+        elif "wiley" in parsed.netloc:
+            paths.append(f"/doi/pdfdirect/{doi}")
+            paths.append(f"/doi/pdf/{doi}")
+        # Generic fallback
+        paths.append(f"/doi/pdf/{doi}")
+        return paths
 
     def _try_carsi_pdf(self, doi: str, resolved_url: str, paper: Paper) -> Paper | None:
         """Try to download publisher PDF via CARSI-authenticated session."""

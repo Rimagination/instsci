@@ -1,11 +1,22 @@
 """Shared HTTP utilities with retry logic."""
 
 import logging
+import os
 import time
+import urllib3
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+# Auto-detect proxy and disable SSL verification warnings
+if os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or \
+   os.environ.get("http_proxy") or os.environ.get("https_proxy"):
+    # When behind a proxy (common with VPN/clash), self-signed certs are expected
+    _SSL_VERIFY = False
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+else:
+    _SSL_VERIFY = True
 
 
 def request_with_retry(
@@ -29,6 +40,7 @@ def request_with_retry(
         The final Response object (even if it's a 4xx error — caller decides).
     """
     kwargs.setdefault("timeout", 30)
+    kwargs.setdefault("verify", _SSL_VERIFY)
 
     for attempt in range(max_retries + 1):
         try:
