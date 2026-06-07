@@ -1,0 +1,200 @@
+{
+  "version": 1,
+  "last_review": "2026-06-07",
+  "purpose": "Reusable policy for choosing institutional identity routes before browser-backed publisher PDF downloads.",
+  "default_mode": "auto",
+  "default_identity": "publisher_broker",
+  "preferred_off_campus_access": "shibboleth_or_openathens",
+  "subscription_institution": {
+    "required_for_closed_access": true,
+    "hardcoded_default": "",
+    "resolution_order": [
+      "--institution",
+      "config.carsi_idp_name",
+      "config.school",
+      "interactive_prompt"
+    ],
+    "prompt_label": "Subscription institution",
+    "notes": "Ask for the user's own subscription institution at the point of use. Do not default to Tsinghua University or any other school."
+  },
+  "final_pdf_verdict_requires": "visible_cloakbrowser",
+  "identity_order": [
+    "publisher_broker",
+    "federated_sso",
+    "webvpn_broker",
+    "campus_connector",
+    "http_preflight"
+  ],
+  "federated_login_methods": [
+    "wayfless_federated_sso",
+    "standard_federated_sso"
+  ],
+  "login_method_order": [
+    "wayfless_federated_sso",
+    "standard_federated_sso",
+    "publisher_article_page_institutional_login",
+    "webvpn_broker",
+    "campus_connector",
+    "http_preflight"
+  ],
+  "routing_rules": [
+    "Ask the user for their own subscription institution when no institution is configured; never use a hard-coded school as the default.",
+    "For off-campus access to publishers that support Shibboleth or OpenAthens, prefer federated institutional authentication over WebVPN.",
+    "When a publisher/institution-specific WAYFless link is configured, use it to skip group/institution selection and enter the institution IdP directly.",
+    "If the WAYFless link fails, fall back to the publisher's standard Shibboleth/OpenAthens institution-selection flow.",
+    "Do not make WebVPN a global default because not every institution provides a WebVPN gateway.",
+    "Use WebVPN only when the configured institution has a WebVPN-style gateway and the publisher route has been browser-verified through that gateway.",
+    "Do not treat exported cookies as full browser session persistence. Cookie stores are useful for HTTP preflight and some request reuse only.",
+    "For closed-access publisher PDFs, keep the visible CloakBrowser context alive when SSO, CAPTCHA, 2FA, Cloudflare, or publisher-generated PDF tokens are involved.",
+    "A final claim that a publisher can or cannot provide a PDF must come from a visible CloakBrowser workflow, not requests, curl, or cookie replay alone.",
+    "When WebVPN fails to provide a PDF, fall back to the publisher-specific broker and article-page institutional login flow before marking the publisher failed."
+  ],
+  "identities": {
+    "publisher_broker": {
+      "global_default": true,
+      "recommended_role": "primary_closed_access_pdf_route",
+      "recommended_persistence": [
+        "same_live_cloakbrowser_context",
+        "browser_profile_dir",
+        "carsi_cookie_dir/<publisher>.json",
+        "attempt_cache"
+      ],
+      "persistence_notes": "The same visible CloakBrowser context preserves browser storage, challenge state, page-generated PDF tokens, and session cookies. The persistent profile is the disk-backed fallback when the broker is restarted.",
+      "final_verdict_scope": "browser verified"
+    },
+    "webvpn": {
+      "global_default": false,
+      "recommended_role": "optional_identity_layer",
+      "enable_when": [
+        "configured_school_type_is_webvpn",
+        "webvpn_base_url_is_set",
+        "user_can_complete_institution_login_in_visible_cloakbrowser"
+      ],
+      "recommended_persistence": [
+        "same_live_cloakbrowser_context",
+        "browser_profile_dir",
+        "webvpn_gateway_cookies",
+        "publisher_broker_fallback"
+      ],
+      "persistence_limits": {
+        "cookie_store": {
+          "verdict_scope": "HTTP preflight only",
+          "notes": "Saved cookies can validate simple gateway reachability, but they do not preserve all browser storage, WebVPN in-memory state, TLS session tickets, publisher challenge state, or generated PDF tokens."
+        },
+        "browser_profile_dir": {
+          "verdict_scope": "browser startup hint",
+          "notes": "A persistent browser profile can keep cookies, localStorage, IndexedDB, service workers, and cache. It still may not restore live connection state, TLS sessions, or challenge state after the process exits."
+        }
+      },
+      "non_exportable_state": [
+        "tls_session",
+        "browser_fingerprint",
+        "in_memory_webvpn_state",
+        "cloudflare_or_waf_challenge_state",
+        "page_generated_pdf_token",
+        "live_http2_connection_state"
+      ],
+      "final_verdict_scope": "browser verified only when the PDF is captured in the active WebVPN CloakBrowser context"
+    },
+    "federated_sso": {
+      "global_default": false,
+      "recommended_role": "preferred_off_campus_identity",
+      "methods": {
+        "wayfless_federated_sso": {
+          "priority": 1,
+          "notes": "Use institution-specific WAYFless links when configured, because they skip the federation group and institution picker and go directly to the institution IdP."
+        },
+        "standard_federated_sso": {
+          "priority": 2,
+          "notes": "Use publisher controls such as Sign in by institution, Log in via Shibboleth, OpenAthens, CARSI, China CERNET Federation, or institution search."
+        }
+      },
+      "recommended_persistence": [
+        "same_live_cloakbrowser_context",
+        "browser_profile_dir",
+        "carsi_cookie_dir/<publisher>.json"
+      ],
+      "persistence_notes": "Use article-page controls such as Institutional Sign In, OpenAthens, Access through your institution, or Access through your organization. The user completes credentials, 2FA, and CAPTCHA manually."
+    },
+    "campus_connector": {
+      "global_default": false,
+      "recommended_role": "network_layer_for_easyconnect_atrust_or_local_socks",
+      "recommended_persistence": [
+        "external_connector_process",
+        "browser_profile_dir",
+        "publisher_broker"
+      ],
+      "persistence_notes": "Some schools require a local connector instead of WebVPN. InstSci should not assume a WebVPN URL exists for these institutions."
+    },
+    "http_preflight": {
+      "global_default": false,
+      "recommended_role": "route_template_and_blocker_diagnostics",
+      "recommended_persistence": [
+        "cookie_store_when_available"
+      ],
+      "final_verdict_scope": "HTTP preflight only"
+    }
+  },
+  "institutional_findings": {
+    "tsinghua_library_notice_2026_06_07": {
+      "institution": "Tsinghua University",
+      "generalizable_rules": [
+        "Many databases support Shibboleth or OpenAthens institutional authentication.",
+        "Standard login flow: publisher login page -> institutional/Shibboleth/OpenAthens login -> federation group such as China CERNET Federation or CARSI when shown -> user's own institution -> institution IdP.",
+        "WAYFless links can skip federation and institution selection when the institution-specific link is configured.",
+        "If a WAYFless shortcut fails, switch to the standard Shibboleth/OpenAthens login page.",
+        "These rules should be parameterized by the user's subscription institution; Tsinghua University is not a default."
+      ],
+      "example_supported_databases": [
+        "AIP",
+        "ACM",
+        "ACS Publications",
+        "Annual Reviews",
+        "Elsevier ScienceDirect",
+        "IOP",
+        "Nature",
+        "Oxford Journals",
+        "RSC",
+        "Scitation",
+        "SpringerLink",
+        "Taylor & Francis",
+        "Wiley"
+      ]
+    },
+    "tsinghua_webvpn_2026_06_07": {
+      "institution": "Tsinghua University",
+      "gateway": "https://webvpn.tsinghua.edu.cn",
+      "verdict": "not_universal_pdf_route",
+      "summary": "The WebVPN login itself succeeded, but saved gateway cookies did not restore the full browser WebVPN session in a new context, and the same live WebVPN CloakBrowser context did not provide direct cross-publisher PDF capture for the sampled publishers.",
+      "http_preflight_artifacts": [
+        "downloads\\webvpn_cross_publisher_probe_20260607.json"
+      ],
+      "browser_verified_artifacts": [
+        "downloads\\webvpn_browser_probe_20260607\\summary.json",
+        "downloads\\webvpn_live_context_probe_20260607\\summary.json"
+      ],
+      "publisher_results": {
+        "elsevier": {
+          "sample_doi": "10.1016/j.watres.2024.121507",
+          "result": "webvpn_pdf_route_connection_closed",
+          "recommended_fallback": "publisher_broker_sciencedirect_view_pdf"
+        },
+        "ieee": {
+          "sample_doi": "10.1109/jstqe.2026.3687110",
+          "result": "stamp_pdf_route_returned_article_without_pdf_capture",
+          "recommended_fallback": "publisher_article_page_institutional_sign_in"
+        },
+        "wiley": {
+          "sample_doi": "10.1002/adfm.202525261",
+          "result": "cloudflare_security_verification",
+          "recommended_fallback": "visible_publisher_broker_wait_for_challenge"
+        },
+        "acs": {
+          "sample_doi": "10.1021/acs.est.6c00693",
+          "result": "article_page_still_showed_access_through_institution",
+          "recommended_fallback": "publisher_article_page_institutional_login"
+        }
+      }
+    }
+  }
+}

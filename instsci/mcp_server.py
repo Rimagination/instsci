@@ -1,4 +1,4 @@
-"""MCP server exposing vpnsci tools for AI agents supporting MCP protocol."""
+"""MCP server exposing InstSci tools for AI agents supporting MCP protocol."""
 
 import asyncio
 import logging
@@ -20,18 +20,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("vpnsci")
+mcp = FastMCP("instsci")
 
 # Lazy-initialized shared fetcher instance
 _fetcher: PaperFetcher | None = None
 
 
-def _get_fetcher() -> PaperFetcher | None:
-    """Get or create the fetcher singleton. Returns None if school not configured."""
+def _get_fetcher() -> PaperFetcher:
+    """Get or create the fetcher singleton."""
     global _fetcher
     config = Config.load()
-    if not config.school:
-        return None
     if _fetcher is None:
         _fetcher = PaperFetcher(config)
     return _fetcher
@@ -45,16 +43,9 @@ def _reset_fetcher():
         _fetcher = None
 
 
-_SCHOOL_NOT_CONFIGURED = (
-    "⚠️ 尚未配置学校。请先告诉我你的学校名称（如「兰州大学」），"
-    "我会帮你配置好再进行操作。\n\n"
-    "你也可以手动运行: vpnsci config-cmd --school 你的学校名称"
-)
-
-
 @mcp.tool()
 async def configure_school(school_name: str) -> str:
-    """Configure which university to use for WebVPN paper access.
+    """Configure which university to use for institutional paper access.
 
     Call this when the user tells you their school name.
     Supports fuzzy matching (e.g. "兰大" will match "兰州大学").
@@ -69,7 +60,7 @@ async def configure_school(school_name: str) -> str:
     except ValueError:
         return (
             f"未找到学校「{school_name}」。"
-            f"请确认学校名称，或使用 vpnsci schools 搜索支持的学校列表。"
+            f"请确认学校名称，或使用 instsci schools 搜索支持的学校列表。"
         )
 
     config = Config.load()
@@ -89,43 +80,36 @@ async def configure_school(school_name: str) -> str:
     type_guidance = ""
     if entry.school_type == "easyconnect":
         type_guidance = (
-            "\n\n⚠️ **该校使用 EasyConnect VPN**，需要额外配置才能获取论文：\n"
-            "1. **推荐方案**：使用 [docker-easyconnect](https://github.com/Hagb/docker-easyconnect)\n"
-            "   ```bash\n"
-            "   docker run --rm -d --name easyconnect --privileged \\\n"
-            "     -p 127.0.0.1:1080:1080 -p 127.0.0.1:8888:8888 \\\n"
-            "     -e EC_VER=7.6.3 -e VPN_ADDR=<VPN地址> hagb/docker-easyconnect\n"
-            "   ```\n"
-            "2. 浏览器打开 `http://127.0.0.1:8888` 完成登录\n"
-            "3. 登录成功后设置代理：`vpnsci config-cmd --proxy-url socks5://127.0.0.1:1080`\n\n"
-            "部分学校也可尝试 [zju-connect](https://github.com/THU-wzj/zju-connect)（更轻量但兼容性有限）。"
+            "\n\n⚠️ **该校需要本地校园连接器**，首次使用前请先完成学校客户端登录：\n"
+            "1. 启动学校要求的 EasyConnect 客户端或兼容容器\n"
+            "2. 完成登录，并确认本地 SOCKS5 入口可用\n"
+            "3. 设置连接器地址：`instsci config-cmd --connector-url socks5://127.0.0.1:1080`\n\n"
+            "如果你已经有可用的 zju-connect 等轻量方案，也可以直接设置本地连接器地址。"
         )
     elif entry.school_type == "atrust":
-        gateway = entry.gateway or entry.host.replace("https://", "").replace("http://", "")
         type_guidance = (
-            f"\n\n⚠️ **该校使用 aTrust 零信任 VPN**，需要 Docker 方案：\n"
-            "1. 安装 Docker Desktop 并启动\n"
-            "2. 运行 docker-easyconnect（aTrust 模式）：\n"
-            "   ```bash\n"
-            "   docker run --rm -d --name easyconnect --privileged \\\n"
-            "     -p 127.0.0.1:1080:1080 -p 127.0.0.1:8888:8888 \\\n"
-            f"     -e EC_VER=7.6.3 -e VPN_ADDR={gateway} hagb/docker-easyconnect\n"
-            "   ```\n"
-            "3. 浏览器打开 `http://127.0.0.1:8888` 完成登录\n"
-            "4. 登录成功后设置代理：`vpnsci config-cmd --proxy-url socks5://127.0.0.1:1080`\n\n"
-            "注意：aTrust 不支持 zju-connect，必须使用 docker-easyconnect。"
+            "\n\n⚠️ **该校需要 aTrust 校园连接器**，首次使用前请先完成学校客户端登录：\n"
+            "1. 启动学校要求的 aTrust 客户端或兼容容器\n"
+            "2. 完成登录，并确认本地 SOCKS5 入口可用\n"
+            "3. 设置连接器地址：`instsci config-cmd --connector-url socks5://127.0.0.1:1080`\n\n"
+            "如果需要容器方案，请按学校入口地址配置 docker-easyconnect。"
         )
     elif entry.school_type == "ezproxy":
         type_guidance = (
-            "\n\n📚 **该校使用 EZproxy 图书馆代理**。首次获取论文时会弹出浏览器，"
+            "\n\n📚 **该校使用图书馆入口**。首次获取论文时会弹出浏览器，"
             "完成学校图书馆登录即可。"
         )
 
-    type_label = {"webvpn": "WebVPN", "easyconnect": "EasyConnect", "atrust": "aTrust", "ezproxy": "EZproxy"}.get(entry.school_type, entry.school_type)
+    type_label = {
+        "webvpn": "CampusPortal",
+        "easyconnect": "CampusConnector",
+        "atrust": "CampusConnector",
+        "ezproxy": "LibraryPortal",
+    }.get(entry.school_type, entry.school_type)
 
     return (
         f"✅ 已配置为 **{entry.name}**（{entry.province}）\n"
-        f"代理地址: {entry.host}\n"
+        f"入口地址: {entry.host}\n"
         f"类型: {type_label}{type_guidance}\n\n"
         f"现在可以开始搜索和获取论文了。"
     )
@@ -136,27 +120,22 @@ async def fetch_paper(identifier: str, format: str = "markdown") -> str:
     """Fetch an academic paper's full text by DOI or URL.
 
     Uses Open Access sources (Unpaywall, arXiv) first, then falls back
-    to WebVPN/EZproxy for paywalled content. Results are cached locally.
+    to institutional access gateways for paywalled content. Results are cached locally.
 
     Args:
         identifier: DOI (e.g. "10.1038/nphys1509") or article URL.
         format: Output format - "markdown" (default), "json", or "text".
     """
     fetcher = _get_fetcher()
-    if fetcher is None:
-        return _SCHOOL_NOT_CONFIGURED
 
-    paper = await asyncio.to_thread(fetcher.fetch, identifier)
-
-    if not paper.full_text and not paper.abstract:
-        return f"Could not extract full text for: {identifier}\nTitle: {paper.title}\nURL: {paper.url}"
+    result = await asyncio.to_thread(fetcher.fetch_with_result, identifier)
 
     if format == "json":
-        return paper.to_json()
+        return result.to_json()
     elif format == "text":
-        return paper.to_text()
+        return result.to_text()
     else:
-        return paper.to_markdown(include_pdf_path=True)
+        return result.to_markdown(include_pdf_path=True)
 
 
 @mcp.tool()

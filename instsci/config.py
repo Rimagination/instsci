@@ -1,24 +1,25 @@
-"""Configuration management for vpnsci."""
+"""Configuration management for InstSci."""
 
 import json
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BASE_DIR = Path.home() / ".vpnsci"
+DEFAULT_BASE_DIR = Path.home() / ".instsci"
+LEGACY_BASE_DIR = Path.home() / ".vpnsci"
 
 
 @dataclass
 class Config:
-    """VpnSci configuration."""
+    """InstSci configuration."""
 
-    school: str = ""  # School name (use 'vpnsci schools' to list, or configure via MCP)
-    webvpn_base_url: str = ""  # Auto-resolved from school if empty
+    school: str = ""  # School name (use 'instsci schools' to list, or configure via MCP)
+    webvpn_base_url: str = ""  # Legacy storage name for the campus access URL
     ezproxy_base_url: str = ""  # EZproxy URL prefix (e.g. http://eproxy.lib.hku.hk/login?url=)
-    proxy_url: str = ""  # SOCKS5 proxy for EasyConnect (e.g. socks5://127.0.0.1:1080)
-    email: str = ""  # Set via 'vpnsci config-cmd --email your@email.com'
+    proxy_url: str = ""  # Legacy storage name for local SOCKS5 connector URL.
+    email: str = ""  # Set via 'instsci config-cmd --email your@email.com'
     elsevier_api_key: str = ""  # Elsevier Developer Portal API key
     elsevier_inst_token: str = ""  # Optional Elsevier institutional token
     flaresolverr_url: str = "http://127.0.0.1:8191/v1"  # FlareSolverr service URL
@@ -44,7 +45,7 @@ class Config:
             self.chrome_profile_dir = str(base / "chrome-profile")
         if not self.carsi_cookie_dir:
             self.carsi_cookie_dir = str(base / "carsi_cookies")
-        # Auto-resolve webvpn_base_url / ezproxy_base_url from school if not set
+        # Auto-resolve campus/library access URL from school if not set.
         if self.school and not self.webvpn_base_url and not self.ezproxy_base_url:
             try:
                 from .schools import get_school
@@ -71,7 +72,10 @@ class Config:
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
         """Load config from JSON file, falling back to defaults."""
-        path = path or (DEFAULT_BASE_DIR / "config.json")
+        if path is None:
+            new_path = DEFAULT_BASE_DIR / "config.json"
+            legacy_path = LEGACY_BASE_DIR / "config.json"
+            path = new_path if new_path.exists() or not legacy_path.exists() else legacy_path
         if path.exists():
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))

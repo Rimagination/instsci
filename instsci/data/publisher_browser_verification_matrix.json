@@ -1,0 +1,625 @@
+{
+  "version": 1,
+  "last_browser_verification": "2026-06-07",
+  "verdict_source": "InstSci built-in CloakBrowser workflow",
+  "scope": "Publisher PDF capability matrix generated from browser-backed runs, not HTTP preflight.",
+  "source_runs": [
+    "downloads\\browser_pdf_verification_20260606_112028\\browser_verification_report.json",
+    "downloads\\browser_pdf_verification_retry_20260606_114701\\browser_verification_report.json",
+    "downloads\\browser_pdf_verification_remaining_20260606_115204\\browser_verification_report.json",
+    "downloads\\publisher_pending_visible_acs_124815\\primary\\summary.json",
+    "downloads\\publisher_pending_visible_annual-reviews_fixed_125946\\primary\\summary.json",
+    "downloads\\publisher_pending_visible_aps_fixed_130551\\primary\\summary.json",
+    "downloads\\publisher_pending_visible_elsevier_fixed_131833\\primary\\summary.json",
+    "downloads\\publisher_pending_visible_ieee_132049\\primary\\summary.json",
+    "downloads\\publisher_pending_visible_world-scientific_132803\\primary\\summary.json",
+    "downloads\\publisher_pending_visible_annual-reviews_openathens4_142609\\primary\\summary.json",
+    "downloads\\publisher_pending_visible_iop_verified3_170849\\primary\\summary.json",
+    "downloads\\publisher_pending_visible_aps_project_profile_classified_175410\\primary\\summary.json",
+    "downloads\\publisher_pending_visible_aps_retry_project_180610\\primary\\summary.json",
+    "downloads\\aps_webvpn_probe_long_20260606_181639\\probe.json",
+    "downloads\\aps_webvpn_requests_probe_20260606_181925\\probe.json",
+    "downloads\\publisher_pending_visible_ieee_wayf_195141\\primary\\summary.json",
+    "downloads\\publisher_pending_visible_world_institution_201547\\primary\\summary.json",
+    "downloads\\publisher_pending_visible_world_yes_201951\\primary\\summary.json",
+    "downloads\\publisher_pending_visible_world_return_202440\\primary\\summary.json",
+    "downloads\\publisher_world_after_banner_fix_205456\\primary\\summary.json",
+    "downloads\\publisher_pending_reverify_ieee_222443\\primary\\summary.json",
+    "downloads\\publisher_pending_reverify_ieee_tsinghua_20260607_reawaken\\primary\\summary.json",
+    "downloads\\publisher_pending_verify_remaining_aps_20260607\\primary\\summary.json",
+    "downloads\\publisher_pending_verify_remaining_elsevier_20260607_after_fix\\primary\\summary.json",
+    "downloads\\publisher_elsevier_retest_enter_pdf_20260607\\primary\\summary.json",
+    "downloads\\publisher_elsevier_direct_pdf_probe_20260607\\probe.json"
+  ],
+  "summary": {
+    "total_count": 21,
+    "browser_verified_count": 19,
+    "pending_count": 1,
+    "browser_verified_publishers": [
+      "acm",
+      "acs",
+      "aip",
+      "ams",
+      "annual-reviews",
+      "copernicus",
+      "frontiers",
+      "ieee",
+      "iop",
+      "mdpi",
+      "oxfordacademic",
+      "plos",
+      "pnas",
+      "royalsocietypublishing",
+      "rsc",
+      "science",
+      "springer",
+      "wiley",
+      "world-scientific"
+    ],
+    "pending_publishers": [
+      "elsevier"
+    ],
+    "unsupported_count": 1,
+    "unsupported_publishers": [
+      "aps"
+    ]
+  },
+  "publishers": {
+    "acm": {
+      "profile_key": "acm",
+      "display_name": "ACM",
+      "sample_doi": "10.1145/3448016.3452834",
+      "browser_verified": true,
+      "status": "success",
+      "reason": "",
+      "state": "pdf_response_captured",
+      "article_url": "https://dl.acm.org/doi/10.1145/3448016.3452834",
+      "final_url": "https://dl.acm.org/doi/10.1145/3448016.3452834",
+      "final_host": "dl.acm.org",
+      "observed_pdf_candidates": [
+        "https://dl.acm.org/doi/pdf/10.1145/3448016.3452834",
+        "https://dl.acm.org/doi/epdf/10.1145/3448016.3452834"
+      ],
+      "observed_route_kind": "doi_pdf",
+      "captured_pdf_size_bytes": 1700172,
+      "verified_text_match": true,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/acm.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "",
+      "source_run": "downloads\\browser_pdf_verification_20260606_112028\\browser_verification_report.json"
+    },
+    "acs": {
+      "profile_key": "acs",
+      "display_name": "ACS",
+      "sample_doi": "10.1021/acs.est.6c00693",
+      "browser_verified": true,
+      "status": "success",
+      "reason": "",
+      "state": "pdf_response_captured",
+      "article_url": "https://pubs.acs.org/doi/10.1021/acs.est.6c00693",
+      "final_url": "https://pubs.acs.org/doi/10.1021/acs.est.6c00693",
+      "final_host": "pubs.acs.org",
+      "observed_pdf_candidates": [
+        "https://pubs.acs.org/doi/pdf/10.1021/acs.est.6c00693?ref=article_openPDF",
+        "https://pubs.acs.org/doi/pdf/10.1021/acs.est.6c00693"
+      ],
+      "observed_route_kind": "doi_pdf",
+      "captured_pdf_size_bytes": 3216417,
+      "verified_text_match": true,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/acs.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "",
+      "source_run": "downloads\\publisher_pending_visible_acs_124815\\primary\\summary.json"
+    },
+    "aip": {
+      "profile_key": "aip",
+      "display_name": "AIP Publishing",
+      "sample_doi": "10.1063/5.0237567",
+      "browser_verified": true,
+      "status": "success",
+      "reason": "",
+      "state": "pdf_response_captured",
+      "article_url": "https://pubs.aip.org/doi/10.1063/5.0237567",
+      "final_url": "https://pubs.aip.org/aip/adv/article/14/11/115013/3319924/A-multiple-linear-regression-model-for-predicting",
+      "final_host": "pubs.aip.org",
+      "observed_pdf_candidates": [
+        "https://pubs.aip.org/doi/epdf/10.1063/5.0237567",
+        "https://pubs.aip.org/doi/pdf/10.1063/5.0237567"
+      ],
+      "observed_route_kind": "doi_epdf",
+      "captured_pdf_size_bytes": 8211325,
+      "verified_text_match": true,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/aip.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "",
+      "source_run": "downloads\\browser_pdf_verification_20260606_112028\\browser_verification_report.json"
+    },
+    "ams": {
+      "profile_key": "ams",
+      "display_name": "AMS",
+      "sample_doi": "10.1175/aies-d-23-0093.1",
+      "browser_verified": true,
+      "status": "success",
+      "reason": "",
+      "state": "pdf_response_captured",
+      "article_url": "https://journals.ametsoc.org/doi/10.1175/aies-d-23-0093.1",
+      "final_url": "https://journals.ametsoc.org/view/journals/aies/3/4/AIES-D-23-0093.1.xml",
+      "final_host": "journals.ametsoc.org",
+      "observed_pdf_candidates": [
+        "https://journals.ametsoc.org/downloadpdf/view/journals/aies/3/4/AIES-D-23-0093.1.pdf"
+      ],
+      "observed_route_kind": "ams_downloadpdf_view",
+      "captured_pdf_size_bytes": 18669987,
+      "verified_text_match": true,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/ams.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "",
+      "source_run": "downloads\\browser_pdf_verification_retry_20260606_114701\\browser_verification_report.json"
+    },
+    "annual-reviews": {
+      "profile_key": "annual-reviews",
+      "display_name": "Annual Reviews",
+      "sample_doi": "10.1146/annurev-phyto-011325-012824",
+      "browser_verified": true,
+      "status": "success",
+      "reason": "",
+      "state": "pdf_response_captured",
+      "article_url": "https://annualreviews.org/doi/10.1146/annurev-phyto-011325-012824",
+      "final_url": "https://www.annualreviews.org/content/journals/10.1146/annurev-phyto-011325-012824",
+      "final_host": "www.annualreviews.org",
+      "observed_pdf_candidates": [
+        "https://annualreviews.org/doi/pdf/10.1146/annurev-phyto-011325-012824",
+        "https://www.annualreviews.org/docserver/fulltext/10.1146/annurev-phyto-011325-012824/annurev-phyto-011325-012824.pdf"
+      ],
+      "observed_route_kind": "doi_pdf_to_docserver",
+      "captured_pdf_size_bytes": 496987,
+      "verified_text_match": true,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/annual-reviews.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "",
+      "source_run": "downloads\\publisher_pending_visible_annual-reviews_openathens4_142609\\primary\\summary.json",
+      "success_note": "OpenAthens path was selected automatically, Tsinghua SSO/2FA was completed manually in visible CloakBrowser, and the Annual Reviews docserver PDF was captured."
+    },
+    "aps": {
+      "profile_key": "aps",
+      "display_name": "APS",
+      "sample_doi": "10.1103/PhysRevLett.128.161102",
+      "browser_verified": false,
+      "status": "unsupported",
+      "reason": "institution_login_unsupported",
+      "state": "institution_login_unsupported",
+      "article_url": "https://doi.org/10.1103/PhysRevLett.128.161102",
+      "final_url": "https://journals.aps.org/prl/abstract/10.1103/PhysRevLett.128.161102",
+      "final_host": "journals.aps.org",
+      "observed_pdf_candidates": [
+        "https://journals.aps.org/prl/pdf/10.1103/PhysRevLett.128.161102",
+        "http://link.aps.org/pdf/10.1103/PhysRevLett.128.161102"
+      ],
+      "observed_route_kind": "pdf_path",
+      "captured_pdf_size_bytes": 0,
+      "verified_text_match": false,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/aps.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "downloads\\publisher_pending_verify_remaining_aps_20260607\\primary\\diagnostics\\10.1103_PhysRevLett.128.161102\\diagnostic.json",
+      "source_run": "downloads\\publisher_pending_verify_remaining_aps_20260607\\primary\\summary.json",
+      "failure_note": "APS article/PDF routes were discovered, but this publisher is marked unsupported for the reusable institutional-login workflow. The article page exposes /login_inst_user for institution-provided username/password, while OpenAthens/WebVPN/CARSI-style routes tested with Tsinghua did not authorize the sample PDF. Do not click the PRL navigation item named Accepted; use only the article PDF route for open-access APS content."
+    },
+    "copernicus": {
+      "profile_key": "copernicus",
+      "display_name": "Copernicus",
+      "sample_doi": "10.5194/acp-24-1-2024",
+      "browser_verified": true,
+      "status": "success",
+      "reason": "",
+      "state": "pdf_response_captured",
+      "article_url": "https://doi.org/10.5194/acp-24-1-2024",
+      "final_url": "https://acp.copernicus.org/articles/24/1/2024/",
+      "final_host": "acp.copernicus.org",
+      "observed_pdf_candidates": [
+        "https://acp.copernicus.org/articles/24/1/2024/acp-24-1-2024.pdf"
+      ],
+      "observed_route_kind": "direct_pdf",
+      "captured_pdf_size_bytes": 3292747,
+      "verified_text_match": true,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/copernicus.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "",
+      "source_run": "downloads\\browser_pdf_verification_20260606_112028\\browser_verification_report.json"
+    },
+    "elsevier": {
+      "profile_key": "elsevier",
+      "display_name": "Elsevier",
+      "sample_doi": "10.1016/j.watres.2024.121507",
+      "browser_verified": false,
+      "status": "failed",
+      "reason": "challenge_or_viewer_timeout",
+      "state": "challenge_or_viewer_timeout",
+      "article_url": "https://doi.org/10.1016/j.watres.2024.121507",
+      "final_url": "https://www.sciencedirect.com/science/article/pii/S0043135424004093/pdfft",
+      "final_host": "www.sciencedirect.com",
+      "observed_pdf_candidates": [
+        "https://www.sciencedirect.com/science/article/pii/S0043135424004093/pdfft",
+        "https://pdf.sciencedirectassets.com/271768/1-s2.0-S0043135424X00068/1-s2.0-S0043135424004093/main.pdf"
+      ],
+      "observed_route_kind": "pii_pdfft_to_signed_asset",
+      "captured_pdf_size_bytes": 0,
+      "verified_text_match": false,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/elsevier.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "downloads\\publisher_elsevier_signed_asset_wait_retry_20260607\\primary\\diagnostics\\10.1016_j.watres.2024.121507\\diagnostic.json",
+      "source_run": "downloads\\publisher_elsevier_signed_asset_wait_retry_20260607\\primary\\summary.json",
+      "failure_note": "ScienceDirect route is learned: DOI/PII article -> /pdfft -> signed pdf.sciencedirectassets.com main.pdf when entitlement exists. Tsinghua SSO returned through auth.elsevier.com/ShibAuth/deliverInstCredentials, and an earlier retry reached a signed main.pdf asset URL. The 2026-06-07 retry remained on the ScienceDirect Cloudflare 'Are you a robot?' challenge at /pdfft for the PDF timeout, so no PDF bytes were captured. This is not an unknown PDF route or a confirmed subscription-entitlement failure."
+    },
+    "frontiers": {
+      "profile_key": "frontiers",
+      "display_name": "Frontiers",
+      "sample_doi": "10.3389/fmicb.2026.1831710",
+      "browser_verified": true,
+      "status": "success",
+      "reason": "",
+      "state": "pdf_response_captured",
+      "article_url": "https://doi.org/10.3389/fmicb.2026.1831710",
+      "final_url": "https://www.frontiersin.org/journals/microbiology/articles/10.3389/fmicb.2026.1831710/full",
+      "final_host": "www.frontiersin.org",
+      "observed_pdf_candidates": [
+        "https://www.frontiersin.org/articles/10.3389/fmicb.2026.1831710/pdf"
+      ],
+      "observed_route_kind": "pdf_path",
+      "captured_pdf_size_bytes": 16841790,
+      "verified_text_match": true,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/frontiers.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "",
+      "source_run": "downloads\\browser_pdf_verification_retry_20260606_114701\\browser_verification_report.json"
+    },
+    "ieee": {
+      "profile_key": "ieee",
+      "display_name": "IEEE",
+      "sample_doi": "10.1109/jstqe.2026.3687110",
+      "browser_verified": true,
+      "status": "success",
+      "reason": "",
+      "state": "pdf_response_captured",
+      "article_url": "https://doi.org/10.1109/jstqe.2026.3687110",
+      "final_url": "https://ieeexplore.ieee.org/document/11493918",
+      "final_host": "ieeexplore.ieee.org",
+      "observed_pdf_candidates": [
+        "https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&isnumber=&arnumber=11493918",
+        "https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11493918"
+      ],
+      "observed_route_kind": "ieee_stamp_pdf",
+      "captured_pdf_size_bytes": 1262685,
+      "verified_text_match": true,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/ieee.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "",
+      "source_run": "downloads\\publisher_pending_reverify_ieee_tsinghua_20260607_reawaken\\primary\\summary.json",
+      "success_note": "IEEE verified through institutional access: article page -> Institutional Sign In -> Tsinghua University(OpenAthens) -> Tsinghua SSO/2FA in visible CloakBrowser -> returned through tlink.lib.tsinghua.edu.cn -> PDF button /stamp/stamp.jsp?tp=&arnumber=11493918 -> PDF captured and text matched the DOI record."
+    },
+    "iop": {
+      "profile_key": "iop",
+      "display_name": "IOP",
+      "sample_doi": "10.1088/1361-648x/ae72dd",
+      "browser_verified": true,
+      "status": "success",
+      "reason": "",
+      "state": "pdf_response_captured",
+      "article_url": "https://iopscience.iop.org/article/10.1088/1361-648x/ae72dd",
+      "final_url": "https://iopscience.iop.org/article/10.1088/1361-648x/ae72dd",
+      "final_host": "iopscience.iop.org",
+      "observed_pdf_candidates": [
+        "https://iopscience.iop.org/article/10.1088/1361-648x/ae72dd/pdf",
+        "https://iopscience.iop.org/article/10.1088/1361-648X/ae72dd/pdf"
+      ],
+      "observed_route_kind": "article_pdf_deeplink",
+      "captured_pdf_size_bytes": 2822291,
+      "verified_text_match": true,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/iop.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "",
+      "source_run": "downloads\\publisher_pending_visible_iop_verified3_170849\\primary\\summary.json",
+      "success_note": "Article access wall was routed to myIOPscience deeplink, OpenAthens entityID was set to Tsinghua, user completed Tsinghua SSO/2FA in visible CloakBrowser, and the IOP PDF was captured."
+    },
+    "mdpi": {
+      "profile_key": "mdpi",
+      "display_name": "MDPI",
+      "sample_doi": "10.3390/foods10081757",
+      "browser_verified": true,
+      "status": "success",
+      "reason": "",
+      "state": "pdf_response_captured",
+      "article_url": "https://doi.org/10.3390/foods10081757",
+      "final_url": "https://www.mdpi.com/2304-8158/10/8/1757",
+      "final_host": "www.mdpi.com",
+      "observed_pdf_candidates": [
+        "https://www.mdpi.com/2304-8158/10/8/1757/pdf",
+        "https://www.mdpi.com/2304-8158/10/8/1757/pdf?version=1627959584"
+      ],
+      "observed_route_kind": "pdf_path",
+      "captured_pdf_size_bytes": 392745,
+      "verified_text_match": false,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/mdpi.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "",
+      "source_run": "downloads\\browser_pdf_verification_20260606_112028\\browser_verification_report.json"
+    },
+    "oxfordacademic": {
+      "profile_key": "oxfordacademic",
+      "display_name": "Oxford Academic",
+      "sample_doi": "10.1093/nar/gkaa892",
+      "browser_verified": true,
+      "status": "success",
+      "reason": "",
+      "state": "pdf_response_captured",
+      "article_url": "https://doi.org/10.1093/nar/gkaa892",
+      "final_url": "https://academic.oup.com/nar/article/49/D1/D10/5937080",
+      "final_host": "academic.oup.com",
+      "observed_pdf_candidates": [
+        "https://academic.oup.com/nar/article-pdf/49/D1/D10/5937080/gkaa892.pdf"
+      ],
+      "observed_route_kind": "oup_article_pdf",
+      "captured_pdf_size_bytes": 1094225,
+      "verified_text_match": true,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/oxfordacademic.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "",
+      "source_run": "downloads\\browser_pdf_verification_retry_20260606_114701\\browser_verification_report.json"
+    },
+    "plos": {
+      "profile_key": "plos",
+      "display_name": "PLOS",
+      "sample_doi": "10.1371/journal.pone.0000001",
+      "browser_verified": true,
+      "status": "success",
+      "reason": "",
+      "state": "pdf_response_captured",
+      "article_url": "https://doi.org/10.1371/journal.pone.0000001",
+      "final_url": "https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0000001",
+      "final_host": "journals.plos.org",
+      "observed_pdf_candidates": [
+        "https://journals.plos.org/plosone/article/file?id=10.1371/journal.pone.0000001&type=printable"
+      ],
+      "observed_route_kind": "plos_printable_file",
+      "captured_pdf_size_bytes": 816502,
+      "verified_text_match": true,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/plos.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "",
+      "source_run": "downloads\\browser_pdf_verification_20260606_112028\\browser_verification_report.json"
+    },
+    "pnas": {
+      "profile_key": "pnas",
+      "display_name": "PNAS",
+      "sample_doi": "10.1073/pnas.2309123120",
+      "browser_verified": true,
+      "status": "success",
+      "reason": "",
+      "state": "pdf_response_captured",
+      "article_url": "https://www.pnas.org/doi/10.1073/pnas.2309123120",
+      "final_url": "https://www.pnas.org/doi/10.1073/pnas.2309123120",
+      "final_host": "www.pnas.org",
+      "observed_pdf_candidates": [
+        "https://www.pnas.org/doi/epdf/10.1073/pnas.2309123120",
+        "https://www.pnas.org/doi/pdf/10.1073/pnas.2309123120?download=true"
+      ],
+      "observed_route_kind": "doi_epdf",
+      "captured_pdf_size_bytes": 2145319,
+      "verified_text_match": true,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/pnas.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "",
+      "source_run": "downloads\\browser_pdf_verification_remaining_20260606_115204\\browser_verification_report.json"
+    },
+    "royalsocietypublishing": {
+      "profile_key": "royalsocietypublishing",
+      "display_name": "Royal Society Publishing",
+      "sample_doi": "10.1098/rsos.150470",
+      "browser_verified": true,
+      "status": "success",
+      "reason": "",
+      "state": "pdf_response_captured",
+      "article_url": "https://royalsocietypublishing.org/doi/10.1098/rsos.150470",
+      "final_url": "https://royalsocietypublishing.org/rsos/article/3/1/150470/36439/First-report-of-Plesiochelys-etalloni-and",
+      "final_host": "royalsocietypublishing.org",
+      "observed_pdf_candidates": [
+        "https://royalsocietypublishing.org/doi/pdf/10.1098/rsos.150470"
+      ],
+      "observed_route_kind": "doi_pdf",
+      "captured_pdf_size_bytes": 1963542,
+      "verified_text_match": true,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/royalsocietypublishing.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "",
+      "source_run": "downloads\\browser_pdf_verification_20260606_112028\\browser_verification_report.json"
+    },
+    "rsc": {
+      "profile_key": "rsc",
+      "display_name": "RSC",
+      "sample_doi": "10.1039/d5cp03829d",
+      "browser_verified": true,
+      "status": "success",
+      "reason": "",
+      "state": "pdf_response_captured",
+      "article_url": "https://doi.org/10.1039/d5cp03829d",
+      "final_url": "https://pubs.rsc.org/en/content/articlelanding/2026/cp/d5cp03829d",
+      "final_host": "pubs.rsc.org",
+      "observed_pdf_candidates": [
+        "https://pubs.rsc.org/en/content/articlepdf/2026/cp/d5cp03829d"
+      ],
+      "observed_route_kind": "rsc_articlepdf",
+      "captured_pdf_size_bytes": 4420907,
+      "verified_text_match": true,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/rsc.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "",
+      "source_run": "downloads\\browser_pdf_verification_20260606_112028\\browser_verification_report.json"
+    },
+    "science": {
+      "profile_key": "science",
+      "display_name": "Science",
+      "sample_doi": "10.1126/sciadv.adp3964",
+      "browser_verified": true,
+      "status": "success",
+      "reason": "",
+      "state": "pdf_response_captured",
+      "article_url": "https://www.science.org/doi/10.1126/sciadv.adp3964",
+      "final_url": "https://www.science.org/doi/10.1126/sciadv.adp3964",
+      "final_host": "www.science.org",
+      "observed_pdf_candidates": [
+        "https://www.science.org/doi/epdf/10.1126/sciadv.adp3964",
+        "https://www.science.org/doi/pdf/10.1126/sciadv.adp3964",
+        "https://www.science.org/doi/pdf/10.1126/sciadv.adp3964?download=true"
+      ],
+      "observed_route_kind": "doi_epdf",
+      "captured_pdf_size_bytes": 3706621,
+      "verified_text_match": true,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/science.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "",
+      "source_run": "downloads\\browser_pdf_verification_20260606_112028\\browser_verification_report.json"
+    },
+    "springer": {
+      "profile_key": "springer",
+      "display_name": "Springer Nature",
+      "sample_doi": "10.1038/s41586-020-2649-2",
+      "browser_verified": true,
+      "status": "success",
+      "reason": "",
+      "state": "pdf_response_captured",
+      "article_url": "https://doi.org/10.1038/s41586-020-2649-2",
+      "final_url": "https://www.nature.com/articles/s41586-020-2649-2",
+      "final_host": "www.nature.com",
+      "observed_pdf_candidates": [
+        "https://www.nature.com/articles/s41586-020-2649-2.pdf"
+      ],
+      "observed_route_kind": "direct_pdf",
+      "captured_pdf_size_bytes": 1218474,
+      "verified_text_match": true,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/springer.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "",
+      "source_run": "downloads\\browser_pdf_verification_20260606_112028\\browser_verification_report.json"
+    },
+    "wiley": {
+      "profile_key": "wiley",
+      "display_name": "Wiley",
+      "sample_doi": "10.1002/adfm.202525261",
+      "browser_verified": true,
+      "status": "success",
+      "reason": "",
+      "state": "pdf_response_captured",
+      "article_url": "https://onlinelibrary.wiley.com/doi/10.1002/adfm.202525261",
+      "final_url": "https://advanced.onlinelibrary.wiley.com/doi/10.1002/adfm.202525261",
+      "final_host": "advanced.onlinelibrary.wiley.com",
+      "observed_pdf_candidates": [
+        "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/adfm.202525261",
+        "https://onlinelibrary.wiley.com/doi/pdf/10.1002/adfm.202525261"
+      ],
+      "observed_route_kind": "doi_pdfdirect",
+      "captured_pdf_size_bytes": 7208860,
+      "verified_text_match": true,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/wiley.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "",
+      "source_run": "downloads\\browser_pdf_verification_retry_20260606_114701\\browser_verification_report.json"
+    },
+    "world-scientific": {
+      "profile_key": "world-scientific",
+      "display_name": "World Scientific",
+      "sample_doi": "10.1142/s0218194026500348",
+      "browser_verified": true,
+      "status": "success",
+      "reason": "",
+      "state": "pdf_response_captured",
+      "article_url": "https://www.worldscientific.com/doi/10.1142/s0218194026500348",
+      "final_url": "https://www.worldscientific.com/doi/10.1142/s0218194026500348",
+      "final_host": "www.worldscientific.com",
+      "observed_pdf_candidates": [
+        "https://www.worldscientific.com/doi/reader/10.1142/S0218194026500348",
+        "https://www.worldscientific.com/doi/pdf/10.1142/s0218194026500348"
+      ],
+      "observed_route_kind": "worldscientific_reader_pdf_viewer",
+      "captured_pdf_size_bytes": 1334850,
+      "verified_text_match": true,
+      "identity_persistence": [
+        "browser_profile_dir",
+        "carsi_cookie_dir/world-scientific.json",
+        "attempt_cache"
+      ],
+      "diagnostic_path": "",
+      "source_run": "downloads\\publisher_world_after_banner_fix_205456\\primary\\summary.json",
+      "success_note": "Institution chain is learned and persisted: Institutional Access, Tsinghua selection/SSO, Terms Yes, institutional banner recognition, PDF/EPUB button, and World Scientific PDF viewer capture. The downloaded PDF text matched the DOI record."
+    }
+  },
+  "source_reports": [
+    "downloads\\publisher_pending_visible_elsevier_project_async_clean_185133\\primary\\summary.json",
+    "downloads\\publisher_pending_visible_ieee_wayf_195141\\primary\\summary.json",
+    "downloads\\publisher_world_after_banner_fix_205456\\primary\\summary.json",
+    "downloads\\publisher_pending_reverify_ieee_222443\\primary\\summary.json",
+    "downloads\\publisher_pending_reverify_ieee_tsinghua_20260607_reawaken\\primary\\summary.json",
+    "downloads\\publisher_pending_verify_remaining_aps_20260607\\primary\\summary.json",
+    "downloads\\publisher_pending_verify_remaining_elsevier_20260607_after_fix\\primary\\summary.json",
+    "downloads\\publisher_elsevier_retest_enter_pdf_20260607\\primary\\summary.json",
+    "downloads\\publisher_elsevier_direct_pdf_probe_20260607\\probe.json"
+  ]
+}

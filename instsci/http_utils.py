@@ -9,10 +9,10 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# Auto-detect proxy and disable SSL verification warnings
+# Auto-detect local HTTP connector and disable SSL verification warnings.
 if os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or \
    os.environ.get("http_proxy") or os.environ.get("https_proxy"):
-    # When behind a proxy (common with VPN/clash), self-signed certs are expected
+    # Local network connectors often use self-signed certificates.
     _SSL_VERIFY = False
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 else:

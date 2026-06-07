@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vpnsci"
+name = "instsci"
 version = "0.1.0"
-description = "Academic paper fetcher with multi-university WebVPN support"
+description = "Academic paper fetcher with institutional access support"
 requires-python = ">=3.10"
 dependencies = [
     "typer>=0.9.0",
@@ -20,11 +20,11 @@ dependencies = [
 ]
 
 [project.scripts]
-vpnsci = "vpnsci.cli:app"
-vpnsci-mcp = "vpnsci.mcp_server:main"
+instsci = "instsci.cli:app"
+instsci-mcp = "instsci.mcp_server:main"
 
 [tool.setuptools.packages.find]
-include = ["vpnsci*"]
+include = ["instsci*", "vpnsci*"]
 
 [tool.setuptools.package-data]
-vpnsci = ["data/*.json"]
+instsci = ["data/*.json"]

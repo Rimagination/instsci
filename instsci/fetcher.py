@@ -1,5 +1,6 @@
 """Core paper fetching logic."""
 
+from contextvars import ContextVar
 import hashlib
 import json
 import logging
@@ -16,11 +17,15 @@ from .http_utils import request_with_retry
 from .carsi import CARSIClient, detect_publisher
 from .config import Config
 from .extractors import html_extractor, pdf_extractor
-from .models import Paper
+from .models import FetchResult, NextAction, Paper
+from .publisher_pdf_router import build_pdf_candidates, discover_pdf_candidates_from_html
+from .publisher_profiles import infer_publisher_profile, infer_publisher_profile_from_url
 from .sources import arxiv, unpaywall
 
 try:
     import cloakbrowser  # noqa: F401 — check availability
+    from .cloakbrowser_compat import ensure_cloakbrowser_platform_compatible
+    ensure_cloakbrowser_platform_compatible()
     _HAS_CLOAKBROWSER = True
 except ImportError:
     _HAS_CLOAKBROWSER = False
@@ -31,6 +36,81 @@ DOI_PATTERN = re.compile(r"^10\.\d{4,9}/[^\s]+$")
 
 # Minimum full_text length to consider a fetch "successful"
 MIN_FULLTEXT_LEN = 1000
+
+_ATTEMPT_LOG: ContextVar[list[dict[str, str]] | None] = ContextVar(
+    "instsci_fetch_attempt_log",
+    default=None,
+)
+
+
+def _record_attempt(stage: str, status: str, reason: str = "", detail: str = "") -> None:
+    attempts = _ATTEMPT_LOG.get()
+    if attempts is None:
+        return
+    attempt = {"stage": stage, "status": status}
+    if reason:
+        attempt["reason"] = reason
+    if detail:
+        attempt["detail"] = detail
+    attempts.append(attempt)
+
+
+def _record_paper_attempt(stage: str, paper: Paper | None) -> None:
+    if paper is None:
+        _record_attempt(stage, "miss", reason="no_result")
+        return
+    if len(paper.full_text or "") >= MIN_FULLTEXT_LEN:
+        _record_attempt(stage, "success", reason="full_text")
+        return
+    _record_attempt(stage, "partial", reason=_paper_quality(paper))
+
+
+def _paper_quality(paper: Paper) -> str:
+    if paper.full_text:
+        return "short_text"
+    if paper.pdf_path:
+        return "pdf_only"
+    if paper.abstract:
+        return "abstract_only"
+    if paper.title or paper.authors or paper.journal or paper.year:
+        return "metadata_only"
+    return "none"
+
+
+def _apply_attempt_diagnostics(result: FetchResult, identifier: str) -> None:
+    """Refine the final next action using provider-level failure provenance."""
+    for attempt in result.attempts:
+        if (
+            attempt.get("stage") == "doi_resolve"
+            and attempt.get("status") == "miss"
+            and attempt.get("reason") == "no_url"
+        ):
+            query = (identifier or result.paper.title or result.paper.doi).replace('"', '\\"')
+            result.status = "blocked"
+            result.reason = "doi_resolution_failed"
+            result.next_action = NextAction(
+                kind="check_identifier",
+                command=f'instsci search "{query}"',
+                message=(
+                    "DOI did not resolve to an article URL. Check the identifier or search "
+                    "for the paper, then retry with a DOI or publisher URL."
+                ),
+            )
+            return
+
+    if (
+        result.status == "partial"
+        and result.next_action
+        and result.next_action.kind == "login"
+        and any(
+            attempt.get("stage") == "institutional_access"
+            and attempt.get("status") == "partial"
+            and attempt.get("reason") in {"none", "metadata_only", "abstract_only", "short_text"}
+            for attempt in result.attempts
+        )
+    ):
+        result.status = "auth_required"
+        result.reason = "institution_login_required"
 
 
 
@@ -78,17 +158,22 @@ class PaperFetcher:
         if use_cache and doi:
             cached = self._load_cache(doi)
             if cached and len(cached.full_text or "") >= MIN_FULLTEXT_LEN:
+                _record_paper_attempt("cache", cached)
                 logger.info("Loaded from cache (good full text): %s", doi)
                 return cached
             elif cached:
+                _record_paper_attempt("cache", cached)
                 logger.info("Cache hit but full text too short (%d chars), re-fetching: %s",
                             len(cached.full_text or ""), doi)
+            else:
+                _record_attempt("cache", "miss", reason="not_found")
 
         paper = Paper(doi=doi or "", url=url or "")
 
         # Step 1: Try Open Access sources first (if we have a DOI)
         if doi:
             oa_paper = self._try_open_access(doi)
+            _record_paper_attempt("open_access", oa_paper)
             if oa_paper and len(oa_paper.full_text or "") >= MIN_FULLTEXT_LEN:
                 self._save_cache(oa_paper)
                 return oa_paper
@@ -96,50 +181,147 @@ class PaperFetcher:
             if oa_paper:
                 paper = oa_paper
 
-        # Step 2: Resolve DOI to URL if needed
+        # Step 2: Try clean publisher APIs before any institutional/browser flow.
+        if doi and not paper.pdf_path:
+            api_paper = self._try_elsevier_api(doi, paper)
+            _record_paper_attempt("elsevier_api", api_paper)
+            if api_paper and len(api_paper.full_text or "") >= MIN_FULLTEXT_LEN:
+                self._save_cache(api_paper)
+                return api_paper
+
+        # Step 3: Resolve DOI to URL if needed
         if doi and not url:
             url = self._resolve_doi(doi)
+            if url:
+                _record_attempt("doi_resolve", "success", detail=url)
+            else:
+                _record_attempt("doi_resolve", "miss", reason="no_url")
             paper.url = url or ""
 
         if not url:
             logger.error("Could not determine URL for: %s", identifier)
             return paper
 
-        # Step 3: Try CARSI-authenticated publisher access (before WebVPN)
+        # Step 4: Try federated publisher access before campus gateway access.
         if self.config.carsi_enabled and doi:
             carsi_paper = self._try_carsi_pdf(doi, url, paper)
+            _record_paper_attempt("carsi_pdf", carsi_paper)
             if carsi_paper and len(carsi_paper.full_text or "") >= MIN_FULLTEXT_LEN:
                 self._save_cache(carsi_paper)
                 return carsi_paper
             if self.config.carsi_enabled and url:
                 carsi_paper = self._try_carsi_html(url, paper)
+                _record_paper_attempt("carsi_html", carsi_paper)
                 if carsi_paper and len(carsi_paper.full_text or "") >= MIN_FULLTEXT_LEN:
                     self._save_cache(carsi_paper)
                     return carsi_paper
 
-        # Step 4: Try direct publisher PDF URL construction (before WebVPN HTML)
+        # Step 5: Try direct publisher PDF URL construction before campus gateway HTML.
         if doi and not paper.pdf_path:
             pdf_paper = self._try_publisher_pdf(doi, url, paper)
+            _record_paper_attempt("publisher_pdf", pdf_paper)
             if pdf_paper and len(pdf_paper.full_text or "") >= MIN_FULLTEXT_LEN:
                 self._save_cache(pdf_paper)
                 return pdf_paper
 
-        # Step 4.5: Try browser-based PDF download (bypasses TLS fingerprinting)
+        # Step 6: Try browser-based PDF download (bypasses TLS fingerprinting)
         if doi and not paper.pdf_path:
             browser_paper = self._try_browser_pdf_download(doi, url, paper)
+            _record_paper_attempt("browser_pdf", browser_paper)
             if browser_paper and len(browser_paper.full_text or "") >= MIN_FULLTEXT_LEN:
                 self._save_cache(browser_paper)
                 return browser_paper
 
-        # Step 5: Fetch via WebVPN
+        # Step 7: Fetch via institutional campus access.
         self._rate_limit()
-        paper = self._fetch_via_webvpn(url, paper)
+        try:
+            paper = self._fetch_via_webvpn(url, paper)
+        except ValueError:
+            _record_attempt("institutional_access", "error", reason="config_needed")
+            raise
+        except requests.RequestException:
+            _record_attempt("institutional_access", "error", reason="gateway_unreachable")
+            raise
+        _record_paper_attempt("institutional_access", paper)
 
         # Save to cache only if we got real full text
         if paper.doi and len(paper.full_text or "") >= MIN_FULLTEXT_LEN:
             self._save_cache(paper)
 
         return paper
+
+    def fetch_with_result(self, identifier: str, use_cache: bool = True) -> FetchResult:
+        """Fetch a paper and return a structured, agent-friendly outcome."""
+        attempts: list[dict[str, str]] = []
+        token = _ATTEMPT_LOG.set(attempts)
+        try:
+            paper = self.fetch(identifier, use_cache=use_cache)
+        except ValueError as exc:
+            doi = self._parse_doi(identifier) or ""
+            url = self._parse_url(identifier) or ""
+            return FetchResult(
+                status="config_needed",
+                quality="none",
+                reason="institution_not_configured",
+                paper=Paper(doi=doi, url=url),
+                next_action=NextAction(
+                    kind="configure_institution",
+                    command="instsci config-cmd --school YOUR_SCHOOL",
+                    message=f"Configure your school or institution before retrying. Detail: {exc}",
+                ),
+                attempts=attempts,
+            )
+        except requests.RequestException as exc:
+            doi = self._parse_doi(identifier) or ""
+            url = self._parse_url(identifier) or ""
+            gateway_error = any(
+                attempt.get("stage") == "institutional_access"
+                and attempt.get("status") == "error"
+                and attempt.get("reason") == "gateway_unreachable"
+                for attempt in attempts
+            )
+            reason = "gateway_unreachable" if gateway_error else "network_error"
+            kind = "diagnose_gateway" if gateway_error else "diagnose"
+            message = (
+                "Institutional gateway could not be reached. Check VPN/proxy/CARSI/WebVPN "
+                f"configuration, then retry. Detail: {exc}"
+                if gateway_error
+                else f"Check network and institutional access configuration. Detail: {exc}"
+            )
+            return FetchResult(
+                status="blocked",
+                quality="none",
+                reason=reason,
+                paper=Paper(doi=doi, url=url),
+                next_action=NextAction(
+                    kind=kind,
+                    command="instsci config-cmd --show",
+                    message=message,
+                ),
+                attempts=attempts,
+            )
+        finally:
+            _ATTEMPT_LOG.reset(token)
+
+        result = FetchResult.from_paper(
+            paper,
+            min_fulltext_len=MIN_FULLTEXT_LEN,
+            institution_configured=self._institution_configured(),
+            identifier=identifier,
+        )
+        result.attempts = attempts
+        _apply_attempt_diagnostics(result, identifier)
+        return result
+
+    def _institution_configured(self) -> bool:
+        """Return whether any legal institutional access path is configured."""
+        return bool(
+            self.config.school
+            or self.config.webvpn_base_url
+            or self.config.ezproxy_base_url
+            or self.config.proxy_url
+            or (self.config.carsi_enabled and self.config.carsi_idp_name)
+        )
 
     def _try_open_access(self, doi: str) -> Paper | None:
         """Try to fetch paper from Open Access sources.
@@ -271,31 +453,14 @@ class PaperFetcher:
 
         Returns the PDF URL string, or None if the publisher is not recognized.
         """
-        parsed = urlparse(resolved_url)
-        hostname = parsed.netloc.lower()
-        doi_suffix = doi.split("/", 1)[-1] if "/" in doi else doi
-
-        if "pubs.acs.org" in hostname:
-            return f"https://pubs.acs.org/doi/pdf/{doi}"
-        elif "onlinelibrary.wiley.com" in hostname:
-            return f"https://onlinelibrary.wiley.com/doi/pdfdirect/{doi}"
-        elif "tandfonline.com" in hostname:
-            return f"https://www.tandfonline.com/doi/pdf/{doi}?needAccess=true"
-        elif "nature.com" in hostname:
-            return f"https://www.nature.com/articles/{doi_suffix}.pdf"
-        elif "link.springer.com" in hostname:
-            return f"https://link.springer.com/content/pdf/{doi}.pdf"
-        elif "pubs.rsc.org" in hostname:
-            pdf_url = resolved_url.replace("/articlelanding/", "/articlepdf/")
-            return pdf_url if pdf_url != resolved_url else None
-        elif "elsevier.com" in hostname or "sciencedirect.com" in hostname:
-            pii_match = re.search(r"pii/([A-Z0-9]+)", resolved_url)
-            if pii_match:
-                return f"https://www.sciencedirect.com/science/article/pii/{pii_match.group(1)}/pdfft"
-        return None
+        profile = infer_publisher_profile_from_url(resolved_url) or infer_publisher_profile(doi)
+        if profile is None:
+            return None
+        candidates = build_pdf_candidates(profile, doi, source_url=resolved_url)
+        return candidates[0] if candidates else None
 
     def _try_publisher_pdf(self, doi: str, resolved_url: str, paper: Paper) -> Paper | None:
-        """Try to directly construct and download the publisher PDF URL via WebVPN."""
+        """Try to directly construct and download the publisher PDF URL via campus access."""
         pdf_url = self._build_publisher_pdf_url(doi, resolved_url)
         if not pdf_url:
             return None
@@ -303,7 +468,7 @@ class PaperFetcher:
         logger.info("Trying constructed publisher PDF URL: %s", pdf_url)
 
         if not self.auth.login():
-            logger.error("Proxy authentication failed.")
+            logger.error("Institutional access authentication failed.")
             return None
 
         self._rate_limit()
@@ -320,7 +485,7 @@ class PaperFetcher:
                 ) if hasattr(pdf_extractor, 'extract_figures_from_text') else []
                 pdf_path = self._save_pdf(doi, pdf_bytes)
                 paper.pdf_path = str(pdf_path) if pdf_path else ""
-                paper.source = "webvpn"
+                paper.source = "institutional"
                 logger.info(
                     "Publisher PDF downloaded successfully (%d bytes, %d chars text)",
                     len(pdf_bytes), len(paper.full_text or ""),
@@ -354,7 +519,7 @@ class PaperFetcher:
         # then use in-browser fetch() for PDF (avoids Cloudflare on direct PDF URLs).
         print("  [Browser] Downloading PDF via browser...")
 
-        # Try reusing the live browser context from WebVPN login first
+        # Try reusing the live browser context from institutional login first.
         live_context = getattr(self.auth, 'browser_context', None)
         if live_context:
             result = self._browser_pdf_download(live_context, resolved_url, doi, paper)
@@ -702,19 +867,19 @@ class PaperFetcher:
         return None
 
     def _fetch_via_webvpn(self, url: str, paper: Paper) -> Paper:
-        """Fetch paper through WebVPN authenticated session."""
+        """Fetch paper through an authenticated institutional access session."""
         # Ensure we're authenticated
         if not self.auth.login():
-            logger.error("Proxy authentication failed.")
+            logger.error("Institutional access authentication failed.")
             return paper
 
-        paper.source = "webvpn"
+        paper.source = "institutional"
 
         try:
             resp = self.auth.fetch(url)
             resp.raise_for_status()
         except requests.RequestException as e:
-            logger.error("Failed to fetch via proxy: %s", e)
+            logger.error("Failed to fetch via institutional access: %s", e)
             return paper
 
         content_type = resp.headers.get("content-type", "").lower()
@@ -786,7 +951,7 @@ class PaperFetcher:
         result = Paper(
             doi=paper.doi,
             url=paper.url,
-            source="webvpn+flaresolverr",
+            source="institutional+flaresolverr",
         )
         self._apply_extracted(result, extracted)
         result.title = result.title or paper.title
@@ -800,7 +965,14 @@ class PaperFetcher:
         return result
 
     def _try_elsevier_api(self, doi: str, paper: Paper) -> Paper | None:
-        """Try fetching via Elsevier RetrievalAPI."""
+        """Fetch paper via Elsevier API (scansci-pdf pattern).
+
+        Two strategies:
+        1. XML full-text: extracts article body text (~40K chars) without PDF
+        2. PDF download: gets PDF binary (may be preview-only without inst_token)
+
+        Both bypass ScienceDirect website and its anti-bot detection.
+        """
         from .sources import elsevier_api
 
         api_key = elsevier_api.get_api_key(self.config.elsevier_api_key)
@@ -808,31 +980,46 @@ class PaperFetcher:
             logger.debug("No Elsevier API key configured")
             return None
 
+        # Only for Elsevier DOIs
+        if not doi.startswith("10.1016/"):
+            return None
+
         logger.info("Trying Elsevier API for %s", doi)
+
+        # Strategy 1: Try XML full text extraction (gives complete article body)
         data = elsevier_api.fetch_fulltext(
             doi,
             api_key=api_key,
             inst_token=self.config.elsevier_inst_token,
         )
-        if not data:
-            return None
+        if data and data.get("full_text"):
+            result = Paper(
+                doi=doi,
+                url=paper.url,
+                source="elsevier_api",
+                title=data.get("title", "") or paper.title,
+                authors=data.get("authors", []) or paper.authors,
+                abstract=data.get("abstract", "") or paper.abstract,
+                full_text=data["full_text"],
+            )
+            logger.info("Elsevier API XML: %d chars of full text", len(data["full_text"]))
+            return result
 
-        result = Paper(
-            doi=doi,
-            url=paper.url,
-            source="elsevier_api",
-            title=data.get("title", "") or paper.title,
-            authors=data.get("authors", []) or paper.authors,
-            abstract=data.get("abstract", "") or paper.abstract,
-            full_text=data.get("full_text", ""),
-            figures=data.get("figures", []),
-            references=data.get("references", []),
+        # Strategy 2: Try PDF download
+        pdf_bytes = elsevier_api.fetch_pdf(
+            doi,
+            api_key=api_key,
+            inst_token=self.config.elsevier_inst_token,
         )
+        if pdf_bytes:
+            paper.full_text = pdf_extractor.extract_from_bytes(pdf_bytes)
+            pdf_path = self._save_pdf(doi, pdf_bytes)
+            paper.pdf_path = str(pdf_path) if pdf_path else ""
+            paper.source = "elsevier_api"
+            logger.info("Elsevier API PDF: %d bytes", len(pdf_bytes))
+            return paper
 
-        if len(result.full_text or "") >= MIN_FULLTEXT_LEN:
-            logger.info("Elsevier API extraction successful (%d chars)", len(result.full_text or ""))
-            self._save_cache(result)
-        return result
+        return None
 
     def _apply_extracted(self, paper: Paper, extracted: dict):
         """Apply extracted content to a Paper object."""
@@ -851,6 +1038,10 @@ class PaperFetcher:
         2. Look for <meta> citation_pdf_url
         3. Construct publisher-specific PDF URLs from the page URL
         """
+        candidates = discover_pdf_candidates_from_html(html, base_url)
+        if candidates:
+            return candidates[0]
+
         from bs4 import BeautifulSoup
 
         soup = BeautifulSoup(html, "lxml")
@@ -964,7 +1155,7 @@ class PaperFetcher:
                 f"https://doi.org/{doi}",
                 allow_redirects=True,
                 timeout=15,
-                headers={"User-Agent": "vpnsci/0.1"},
+                headers={"User-Agent": "instsci/0.1"},
                 stream=True,  # Don't download full body
             )
             resp.close()

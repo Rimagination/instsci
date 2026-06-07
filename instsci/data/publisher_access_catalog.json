@@ -1,0 +1,969 @@
+{
+  "version": 1,
+  "last_static_review": "2026-06-06",
+  "purpose": "Reusable publisher PDF access knowledge for official DOI-to-PDF workflows.",
+  "publishers": {
+    "acs": {
+      "profile_key": "acs",
+      "display_name": "ACS Publications",
+      "pdf_route_strategy": [
+        "doi_pdf_template",
+        "doi_epdf_fallback",
+        "page_discovered_pdf_links"
+      ],
+      "identity": {
+        "anonymous_access": "open_access_articles_only",
+        "closed_access_requires": [
+          "institutional_ip_or_proxy",
+          "federated_sso_or_openathens",
+          "personal_or_library_subscription"
+        ],
+        "login_entry_hints": [
+          "Access through your institution",
+          "OpenAthens",
+          "Shibboleth"
+        ],
+        "challenge_risk": "medium"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/acs.json",
+          "attempt_cache"
+        ],
+        "preferred": "persistent_browser_profile",
+        "notes": "Institution cookies should be captured in the shared browser profile and cloned for parallel workers."
+      },
+      "link_characteristics": [
+        "/doi/pdf/{doi}",
+        "/doi/epdf/{doi}",
+        "citation_pdf_url",
+        "PDF anchors"
+      ],
+      "verification": {
+        "sample_doi": "10.1021/acs.est.6c00693",
+        "expected_domains": [
+          "pubs.acs.org"
+        ],
+        "expected_pdf_markers": [
+          "/doi/pdf/",
+          "/doi/epdf/"
+        ]
+      }
+    },
+    "aip": {
+      "profile_key": "aip",
+      "display_name": "AIP Publishing",
+      "pdf_route_strategy": [
+        "view_xml_to_downloadpdf",
+        "atypon_epdf_first",
+        "doi_pdf_fallback",
+        "page_discovered_pdf_links"
+      ],
+      "identity": {
+        "anonymous_access": "open_access_articles_only",
+        "closed_access_requires": [
+          "institutional_ip_or_proxy",
+          "federated_sso_or_openathens",
+          "personal_or_library_subscription"
+        ],
+        "login_entry_hints": [
+          "article auth wall /login_inst_user",
+          "Log in with username/password provided by your institution",
+          "Institutional Login",
+          "OpenAthens",
+          "Sign in"
+        ],
+        "challenge_risk": "medium"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/aip.json",
+          "attempt_cache"
+        ],
+        "preferred": "persistent_browser_profile",
+        "notes": "AIP is Atypon-style; keep pubs.aip.org cookies and any institution/OpenAthens cookies in the shared browser profile."
+      },
+      "link_characteristics": [
+        "pubs.aip.org/doi/{doi}",
+        "pubs.aip.org/doi/epdf/{doi}",
+        "pubs.aip.org/doi/pdf/{doi}"
+      ],
+      "verification": {
+        "sample_doi": "10.1063/5.0237567",
+        "expected_domains": [
+          "pubs.aip.org"
+        ],
+        "expected_pdf_markers": [
+          "/doi/epdf/",
+          "/doi/pdf/"
+        ]
+      }
+    },
+    "ams": {
+      "profile_key": "ams",
+      "display_name": "American Meteorological Society",
+      "pdf_route_strategy": [
+        "atypon_epdf_first",
+        "doi_pdf_fallback",
+        "page_discovered_pdf_links"
+      ],
+      "identity": {
+        "anonymous_access": "open_access_articles_only",
+        "closed_access_requires": [
+          "institutional_ip_or_proxy",
+          "federated_sso_or_openathens",
+          "personal_or_library_subscription"
+        ],
+        "login_entry_hints": [
+          "Institutional Login",
+          "OpenAthens",
+          "Sign in"
+        ],
+        "challenge_risk": "medium"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/ams.json",
+          "attempt_cache"
+        ],
+        "preferred": "persistent_browser_profile",
+        "notes": "AMS resolves to journals.ametsoc.org article pages; keep the browser profile warm before retrying direct epdf/pdf candidates."
+      },
+      "link_characteristics": [
+        "journals.ametsoc.org/view/journals/.../{article}.xml -> journals.ametsoc.org/downloadpdf/view/journals/.../{article}.pdf",
+        "journals.ametsoc.org/doi/{doi}",
+        "journals.ametsoc.org/doi/epdf/{doi}",
+        "journals.ametsoc.org/doi/pdf/{doi}"
+      ],
+      "verification": {
+        "sample_doi": "10.1175/aies-d-23-0093.1",
+        "expected_domains": [
+          "journals.ametsoc.org"
+        ],
+        "expected_pdf_markers": [
+          "/downloadpdf/view/",
+          "/doi/epdf/",
+          "/doi/pdf/"
+        ]
+      }
+    },
+    "acm": {
+      "profile_key": "acm",
+      "display_name": "ACM Digital Library",
+      "pdf_route_strategy": [
+        "doi_pdf_template",
+        "page_discovered_pdf_links"
+      ],
+      "identity": {
+        "anonymous_access": "open_access_articles_only",
+        "closed_access_requires": [
+          "institutional_ip_or_proxy",
+          "federated_sso_or_openathens",
+          "personal_or_library_subscription"
+        ],
+        "login_entry_hints": [
+          "Institutional Login",
+          "OpenAthens",
+          "Sign in"
+        ],
+        "challenge_risk": "medium"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/acm.json",
+          "attempt_cache"
+        ],
+        "preferred": "persistent_browser_profile",
+        "notes": "ACM may require consent and institution cookies before the PDF route returns content."
+      },
+      "link_characteristics": [
+        "/doi/pdf/{doi}",
+        "citation_pdf_url",
+        "PDF anchors"
+      ],
+      "verification": {
+        "sample_doi": "10.1145/3448016.3452834",
+        "expected_domains": [
+          "dl.acm.org"
+        ],
+        "expected_pdf_markers": [
+          "/doi/pdf/"
+        ]
+      }
+    },
+    "annual-reviews": {
+      "profile_key": "annual-reviews",
+      "display_name": "Annual Reviews",
+      "pdf_route_strategy": [
+        "doi_pdf_template",
+        "page_discovered_pdf_links"
+      ],
+      "identity": {
+        "anonymous_access": "open_access_articles_only",
+        "closed_access_requires": [
+          "institutional_ip_or_proxy",
+          "federated_sso_or_openathens",
+          "personal_or_library_subscription"
+        ],
+        "login_entry_hints": [
+          "Institutional Login",
+          "OpenAthens",
+          "Sign in"
+        ],
+        "challenge_risk": "medium"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/annual-reviews.json",
+          "attempt_cache"
+        ],
+        "preferred": "persistent_browser_profile",
+        "notes": "Consent and subscription cookies may be needed before direct PDF URLs work."
+      },
+      "link_characteristics": [
+        "/doi/pdf/{doi}",
+        "citation_pdf_url",
+        "PDF anchors"
+      ],
+      "verification": {
+        "sample_doi": "10.1146/annurev-phyto-011325-012824",
+        "expected_domains": [
+          "annualreviews.org"
+        ],
+        "expected_pdf_markers": [
+          "/doi/pdf/"
+        ]
+      }
+    },
+    "aps": {
+      "profile_key": "aps",
+      "display_name": "American Physical Society",
+      "pdf_route_strategy": [
+        "link_aps_doi_to_pdf_path",
+        "journals_aps_abstract_to_pdf_path",
+        "page_discovered_pdf_links"
+      ],
+      "identity": {
+        "anonymous_access": "open_access_articles_only",
+        "closed_access_requires": [
+          "institutional_ip_or_proxy",
+          "federated_sso_or_openathens",
+          "personal_or_library_subscription"
+        ],
+        "login_entry_hints": [
+          "APS institutional username/password page /login_inst_user is not reusable CARSI/OpenAthens SSO",
+          "OpenAthens/WebVPN tested with Tsinghua did not authorize the sample PDF",
+          "Use APS PDF route only when the article is OA or otherwise already entitled"
+        ],
+        "challenge_risk": "medium"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/aps.json",
+          "attempt_cache"
+        ],
+        "preferred": "persistent_browser_profile",
+        "notes": "APS article/PDF routes were discovered, but this publisher is marked unsupported for the reusable institutional-login workflow. The article page exposes /login_inst_user for institution-provided username/password, while OpenAthens/WebVPN/CARSI-style routes tested with Tsinghua did not authorize the sample PDF. Do not click the PRL navigation item named Accepted; use only the article PDF route for open-access APS content."
+      },
+      "link_characteristics": [
+        "link.aps.org/doi/{doi} -> link.aps.org/pdf/{doi}",
+        "journals.aps.org/.../abstract/{doi} -> .../pdf/{doi}",
+        "journals.aps.org/login_inst_user is institution-provided username/password and is marked unsupported for the reusable institutional SSO workflow"
+      ],
+      "verification": {
+        "sample_doi": "10.1103/PhysRevLett.128.161102",
+        "expected_domains": [
+          "link.aps.org",
+          "journals.aps.org"
+        ],
+        "expected_pdf_markers": [
+          "/pdf/10.1103/"
+        ]
+      }
+    },
+    "copernicus": {
+      "profile_key": "copernicus",
+      "display_name": "Copernicus",
+      "pdf_route_strategy": [
+        "doi_suffix_to_journal_articles_pdf",
+        "page_discovered_pdf_links"
+      ],
+      "identity": {
+        "anonymous_access": "usually_open_access",
+        "closed_access_requires": [
+          "not_applicable_open_access_publisher"
+        ],
+        "login_entry_hints": [],
+        "challenge_risk": "low"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/copernicus.json",
+          "attempt_cache"
+        ],
+        "preferred": "stateless_pdf_route",
+        "notes": "Copernicus DOI suffix encodes journal, volume, page, and year; no institutional identity should be needed for normal article PDFs."
+      },
+      "link_characteristics": [
+        "10.5194/{journal}-{volume}-{page}-{year}",
+        "{journal}.copernicus.org/articles/{volume}/{page}/{year}/{suffix}.pdf"
+      ],
+      "verification": {
+        "sample_doi": "10.5194/acp-24-1-2024",
+        "expected_domains": [
+          "copernicus.org"
+        ],
+        "expected_pdf_markers": [
+          ".pdf",
+          "/articles/"
+        ]
+      }
+    },
+    "elsevier": {
+      "profile_key": "elsevier",
+      "display_name": "Elsevier / ScienceDirect",
+      "pdf_route_strategy": [
+        "pii_to_pdfft",
+        "signed_main_pdf_from_page",
+        "citation_pdf_url",
+        "filter_supplementary_mmc"
+      ],
+      "identity": {
+        "anonymous_access": "open_access_articles_only",
+        "closed_access_requires": [
+          "institutional_ip_or_proxy",
+          "federated_sso_or_openathens",
+          "personal_or_library_subscription",
+          "optional_elsevier_api_institution_token"
+        ],
+        "login_entry_hints": [
+          "Access through your organization",
+          "Tsinghua University result in ScienceDirect organization search",
+          "Access through Tsinghua University indicates persisted institutional state",
+          "Full text access/View PDF means PDF capture should continue immediately",
+          "Article preview + Purchase PDF + Access through Tsinghua University means the article is not yet in an authorized full-text view",
+          "ScienceDirect Cloudflare challenge on /pdfft or pdf.sciencedirectassets.com means manual browser verification is still required"
+        ],
+        "challenge_risk": "high"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/elsevier.json",
+          "attempt_cache"
+        ],
+        "preferred": "persistent_browser_profile",
+        "notes": "ScienceDirect route is learned: DOI/PII article -> /pdfft -> signed pdf.sciencedirectassets.com main.pdf when entitlement exists. Tsinghua SSO returned through auth.elsevier.com/ShibAuth/deliverInstCredentials, and an earlier retry reached a signed main.pdf asset URL. The 2026-06-07 retry remained on the ScienceDirect Cloudflare 'Are you a robot?' challenge at /pdfft for the PDF timeout, so no PDF bytes were captured. This is not an unknown PDF route or a confirmed subscription-entitlement failure."
+      },
+      "link_characteristics": [
+        "linkinghub.elsevier.com/retrieve/pii/{PII}",
+        "sciencedirect.com/science/article/pii/{PII}/pdfft",
+        "authorized PDF may continue to pdf.sciencedirectassets.com/.../main.pdf",
+        "if /pdfft returns /science/article/abs/pii/{PII} with Article preview and Purchase PDF, re-enter institutional access before treating it as an entitlement issue",
+        "if /pdfft or pdf.sciencedirectassets.com shows 'Are you a robot?', wait for the user to complete the visible Cloudflare challenge before fetching the PDF bytes",
+        "ignore -mmc/_mmc/content/image supplementary PDFs"
+      ],
+      "verification": {
+        "sample_doi": "10.1016/j.watres.2024.121507",
+        "expected_domains": [
+          "linkinghub.elsevier.com",
+          "sciencedirect.com"
+        ],
+        "expected_pdf_markers": [
+          "/pdfft",
+          "main.pdf"
+        ]
+      }
+    },
+    "frontiers": {
+      "profile_key": "frontiers",
+      "display_name": "Frontiers",
+      "pdf_route_strategy": [
+        "article_pdf_template",
+        "page_discovered_pdf_links"
+      ],
+      "identity": {
+        "anonymous_access": "usually_open_access",
+        "closed_access_requires": [
+          "not_applicable_open_access_publisher"
+        ],
+        "login_entry_hints": [],
+        "challenge_risk": "low"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/frontiers.json",
+          "attempt_cache"
+        ],
+        "preferred": "stateless_pdf_route",
+        "notes": "Most Frontiers articles are OA; persistent cookies are mainly for challenge or consent state."
+      },
+      "link_characteristics": [
+        "/journals/.../articles/{doi}/full",
+        "/articles/{doi}/pdf"
+      ],
+      "verification": {
+        "sample_doi": "10.3389/fmicb.2026.1831710",
+        "expected_domains": [
+          "frontiersin.org"
+        ],
+        "expected_pdf_markers": [
+          "/pdf"
+        ]
+      }
+    },
+    "ieee": {
+      "profile_key": "ieee",
+      "display_name": "IEEE Xplore",
+      "pdf_route_strategy": [
+        "document_id_to_stamp_pdf",
+        "page_discovered_pdf_links"
+      ],
+      "identity": {
+        "anonymous_access": "open_access_articles_only",
+        "closed_access_requires": [
+          "institutional_ip_or_proxy",
+          "federated_sso_or_openathens",
+          "personal_or_library_subscription"
+        ],
+        "login_entry_hints": [
+          "Access through your institution",
+          "OpenAthens",
+          "Institutional sign in"
+        ],
+        "challenge_risk": "high"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/ieee.json",
+          "attempt_cache"
+        ],
+        "preferred": "persistent_browser_profile",
+        "notes": "PDF route depends on arnumber from /document/{id}; cookies should stay in the browser profile. Verified Tsinghua chain: IEEE Xplore in-page Institutional Sign In modal -> Access Through Your Institution -> Tsinghua University(OpenAthens) -> Tsinghua SSO/2FA -> tlink.lib.tsinghua.edu.cn return -> article PDF button /stamp/stamp.jsp?tp=&arnumber={arnumber}. Do not directly navigate to servlet/wayf.jsp; that drops the SeamlessAccess context and can produce a false institution_not_registered verdict."
+      },
+      "link_characteristics": [
+        "ieeexplore.ieee.org/document/{arnumber}",
+        "stampPDF/getPDF.jsp?...&arnumber={arnumber}"
+      ],
+      "verification": {
+        "sample_doi": "10.1109/jstqe.2026.3687110",
+        "expected_domains": [
+          "ieeexplore.ieee.org"
+        ],
+        "expected_pdf_markers": [
+          "stampPDF",
+          "arnumber="
+        ]
+      }
+    },
+    "iop": {
+      "profile_key": "iop",
+      "display_name": "IOPscience",
+      "pdf_route_strategy": [
+        "article_pdf_template",
+        "page_discovered_pdf_links"
+      ],
+      "identity": {
+        "anonymous_access": "open_access_articles_only",
+        "closed_access_requires": [
+          "institutional_ip_or_proxy",
+          "federated_sso_or_openathens",
+          "personal_or_library_subscription"
+        ],
+        "login_entry_hints": [
+          "Institutional Login",
+          "OpenAthens",
+          "Sign in"
+        ],
+        "challenge_risk": "high"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/iop.json",
+          "attempt_cache"
+        ],
+        "preferred": "persistent_browser_profile",
+        "notes": "IOP may present PerfDrive/challenge pages before the article or PDF route."
+      },
+      "link_characteristics": [
+        "iopscience.iop.org/article/{doi}",
+        "iopscience.iop.org/article/{doi}/pdf"
+      ],
+      "verification": {
+        "sample_doi": "10.1088/1361-648x/ae72dd",
+        "expected_domains": [
+          "iopscience.iop.org"
+        ],
+        "expected_pdf_markers": [
+          "/pdf"
+        ]
+      }
+    },
+    "mdpi": {
+      "profile_key": "mdpi",
+      "display_name": "MDPI",
+      "pdf_route_strategy": [
+        "doi_to_known_issn_landing_pdf",
+        "landing_url_to_pdf",
+        "citation_pdf_url"
+      ],
+      "identity": {
+        "anonymous_access": "usually_open_access",
+        "closed_access_requires": [
+          "not_applicable_open_access_publisher"
+        ],
+        "login_entry_hints": [],
+        "challenge_risk": "low"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/mdpi.json",
+          "attempt_cache"
+        ],
+        "preferred": "stateless_pdf_route",
+        "notes": "Classic MDPI numeric landing pages append /pdf; cookies are only useful for consent or challenge state."
+      },
+      "link_characteristics": [
+        "www.mdpi.com/{issn}/{volume}/{issue}/{article}",
+        "www.mdpi.com/{issn}/{volume}/{issue}/{article}/pdf"
+      ],
+      "verification": {
+        "sample_doi": "10.3390/foods10081757",
+        "expected_domains": [
+          "mdpi.com"
+        ],
+        "expected_pdf_markers": [
+          "/pdf"
+        ]
+      }
+    },
+    "oxfordacademic": {
+      "profile_key": "oxfordacademic",
+      "display_name": "Oxford Academic",
+      "pdf_route_strategy": [
+        "article_page_to_article_pdf",
+        "doi_pdf_template",
+        "doi_epdf_fallback",
+        "page_discovered_pdf_links"
+      ],
+      "identity": {
+        "anonymous_access": "open_access_articles_only",
+        "closed_access_requires": [
+          "institutional_ip_or_proxy",
+          "federated_sso_or_openathens",
+          "personal_or_library_subscription"
+        ],
+        "login_entry_hints": [
+          "Institutional Login",
+          "OpenAthens",
+          "Sign in"
+        ],
+        "challenge_risk": "medium"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/oxfordacademic.json",
+          "attempt_cache"
+        ],
+        "preferred": "persistent_browser_profile",
+        "notes": "Oxford Academic article pages vary by journal path, but PDF fallback is stable under academic.oup.com/doi/pdf or /doi/epdf."
+      },
+      "link_characteristics": [
+        "academic.oup.com/{journal}/article/{path}/{id} -> academic.oup.com/{journal}/article-pdf/{path}/{id}/{doi_suffix}.pdf",
+        "academic.oup.com/doi/pdf/{doi}",
+        "academic.oup.com/doi/epdf/{doi}",
+        "article-pdf links"
+      ],
+      "verification": {
+        "sample_doi": "10.1093/nar/gkaa892",
+        "expected_domains": [
+          "academic.oup.com"
+        ],
+        "expected_pdf_markers": [
+          "/doi/pdf/",
+          "/doi/epdf/",
+          "/article-pdf/"
+        ]
+      }
+    },
+    "plos": {
+      "profile_key": "plos",
+      "display_name": "PLOS",
+      "pdf_route_strategy": [
+        "doi_journal_code_to_printable_file",
+        "page_discovered_pdf_links"
+      ],
+      "identity": {
+        "anonymous_access": "usually_open_access",
+        "closed_access_requires": [
+          "not_applicable_open_access_publisher"
+        ],
+        "login_entry_hints": [],
+        "challenge_risk": "low"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/plos.json",
+          "attempt_cache"
+        ],
+        "preferred": "stateless_pdf_route",
+        "notes": "PLOS DOI journal code maps to journals.plos.org/{journal}/article/file?id={doi}&type=printable."
+      },
+      "link_characteristics": [
+        "10.1371/journal.{code}.*",
+        "journals.plos.org/{journal}/article/file?id={doi}&type=printable"
+      ],
+      "verification": {
+        "sample_doi": "10.1371/journal.pone.0000001",
+        "expected_domains": [
+          "journals.plos.org"
+        ],
+        "expected_pdf_markers": [
+          "type=printable",
+          "/article/file"
+        ]
+      }
+    },
+    "pnas": {
+      "profile_key": "pnas",
+      "display_name": "PNAS",
+      "pdf_route_strategy": [
+        "atypon_epdf_first",
+        "doi_pdf_download_fallback",
+        "doi_pdf_fallback",
+        "page_discovered_pdf_links"
+      ],
+      "identity": {
+        "anonymous_access": "open_access_articles_only",
+        "closed_access_requires": [
+          "institutional_ip_or_proxy",
+          "federated_sso_or_openathens",
+          "personal_or_library_subscription"
+        ],
+        "login_entry_hints": [
+          "Institutional Login",
+          "OpenAthens",
+          "Sign in"
+        ],
+        "challenge_risk": "medium"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/pnas.json",
+          "attempt_cache"
+        ],
+        "preferred": "persistent_browser_profile",
+        "notes": "PNAS is Atypon-style; direct PDF candidates may require the same browser profile used to open the article."
+      },
+      "link_characteristics": [
+        "pnas.org/doi/{doi}",
+        "pnas.org/doi/epdf/{doi}",
+        "pnas.org/doi/pdf/{doi}?download=true"
+      ],
+      "verification": {
+        "sample_doi": "10.1073/pnas.2309123120",
+        "expected_domains": [
+          "pnas.org"
+        ],
+        "expected_pdf_markers": [
+          "/doi/epdf/",
+          "/doi/pdf/"
+        ]
+      }
+    },
+    "royalsocietypublishing": {
+      "profile_key": "royalsocietypublishing",
+      "display_name": "Royal Society Publishing",
+      "pdf_route_strategy": [
+        "doi_pdf_template",
+        "page_discovered_pdf_links"
+      ],
+      "identity": {
+        "anonymous_access": "open_access_articles_only",
+        "closed_access_requires": [
+          "institutional_ip_or_proxy",
+          "federated_sso_or_openathens",
+          "personal_or_library_subscription"
+        ],
+        "login_entry_hints": [
+          "Institutional Login",
+          "OpenAthens",
+          "Sign in"
+        ],
+        "challenge_risk": "medium"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/royalsocietypublishing.json",
+          "attempt_cache"
+        ],
+        "preferred": "persistent_browser_profile",
+        "notes": "Royal Society Publishing exposes stable /doi/pdf/{doi}; browser profile stores consent, subscription, and federated login state."
+      },
+      "link_characteristics": [
+        "royalsocietypublishing.org/doi/{doi}",
+        "royalsocietypublishing.org/doi/pdf/{doi}"
+      ],
+      "verification": {
+        "sample_doi": "10.1098/rsos.150470",
+        "expected_domains": [
+          "royalsocietypublishing.org"
+        ],
+        "expected_pdf_markers": [
+          "/doi/pdf/"
+        ]
+      }
+    },
+    "rsc": {
+      "profile_key": "rsc",
+      "display_name": "Royal Society of Chemistry",
+      "pdf_route_strategy": [
+        "articlelanding_to_articlepdf",
+        "doi_pdf_template",
+        "page_discovered_pdf_links"
+      ],
+      "identity": {
+        "anonymous_access": "open_access_articles_only",
+        "closed_access_requires": [
+          "institutional_ip_or_proxy",
+          "federated_sso_or_openathens",
+          "personal_or_library_subscription"
+        ],
+        "login_entry_hints": [
+          "Access provided by",
+          "Institutional Login",
+          "OpenAthens"
+        ],
+        "challenge_risk": "medium"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/rsc.json",
+          "attempt_cache"
+        ],
+        "preferred": "persistent_browser_profile",
+        "notes": "Landing pages route predictably from /articlelanding/ to /articlepdf/."
+      },
+      "link_characteristics": [
+        "/en/content/articlelanding/... -> /en/content/articlepdf/...",
+        "/content/articlepdf/"
+      ],
+      "verification": {
+        "sample_doi": "10.1039/d5cp03829d",
+        "expected_domains": [
+          "pubs.rsc.org"
+        ],
+        "expected_pdf_markers": [
+          "/content/articlepdf/"
+        ]
+      }
+    },
+    "science": {
+      "profile_key": "science",
+      "display_name": "Science / AAAS",
+      "pdf_route_strategy": [
+        "atypon_epdf_first",
+        "doi_pdf_fallback",
+        "doi_pdf_download_fallback",
+        "page_discovered_pdf_links"
+      ],
+      "identity": {
+        "anonymous_access": "open_access_articles_only",
+        "closed_access_requires": [
+          "institutional_ip_or_proxy",
+          "federated_sso_or_openathens",
+          "personal_or_library_subscription"
+        ],
+        "login_entry_hints": [
+          "Institutional Login",
+          "OpenAthens",
+          "Sign in"
+        ],
+        "challenge_risk": "high"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/science.json",
+          "attempt_cache"
+        ],
+        "preferred": "persistent_browser_profile",
+        "notes": "Science/AAAS is Atypon-style and commonly uses browser checks; persist the full browser profile after manual SSO/CAPTCHA."
+      },
+      "link_characteristics": [
+        "science.org/doi/{doi}",
+        "science.org/doi/epdf/{doi}",
+        "science.org/doi/pdf/{doi}",
+        "science.org/doi/pdf/{doi}?download=true"
+      ],
+      "verification": {
+        "sample_doi": "10.1126/sciadv.adp3964",
+        "expected_domains": [
+          "science.org"
+        ],
+        "expected_pdf_markers": [
+          "/doi/epdf/",
+          "/doi/pdf/"
+        ]
+      }
+    },
+    "springer": {
+      "profile_key": "springer",
+      "display_name": "Springer Nature / Nature",
+      "pdf_route_strategy": [
+        "springer_content_pdf_template",
+        "nature_article_suffix_pdf",
+        "page_discovered_pdf_links"
+      ],
+      "identity": {
+        "anonymous_access": "open_access_articles_only",
+        "closed_access_requires": [
+          "institutional_ip_or_proxy",
+          "federated_sso_or_openathens",
+          "personal_or_library_subscription"
+        ],
+        "login_entry_hints": [
+          "Access through your institution",
+          "Springer Nature account",
+          "OpenAthens"
+        ],
+        "challenge_risk": "medium"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/springer.json",
+          "attempt_cache"
+        ],
+        "preferred": "persistent_browser_profile",
+        "notes": "Same profile covers link.springer.com and nature.com PDF conventions."
+      },
+      "link_characteristics": [
+        "link.springer.com/content/pdf/{doi_quoted}.pdf",
+        "nature.com/articles/{doi_suffix}.pdf"
+      ],
+      "verification": {
+        "sample_doi": "10.1038/s41586-020-2649-2",
+        "expected_domains": [
+          "link.springer.com",
+          "nature.com"
+        ],
+        "expected_pdf_markers": [
+          "/content/pdf/",
+          ".pdf"
+        ]
+      }
+    },
+    "wiley": {
+      "profile_key": "wiley",
+      "display_name": "Wiley Online Library",
+      "pdf_route_strategy": [
+        "pdfdirect_first",
+        "doi_pdf_fallback",
+        "epdf_fallback",
+        "page_discovered_pdf_links"
+      ],
+      "identity": {
+        "anonymous_access": "open_access_articles_only",
+        "closed_access_requires": [
+          "institutional_ip_or_proxy",
+          "federated_sso_or_openathens",
+          "personal_or_library_subscription"
+        ],
+        "login_entry_hints": [
+          "Institutional Login",
+          "OpenAthens",
+          "Shibboleth"
+        ],
+        "challenge_risk": "medium"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/wiley.json",
+          "attempt_cache"
+        ],
+        "preferred": "persistent_browser_profile",
+        "notes": "Prefer /doi/pdfdirect/ before /doi/pdf/ and /doi/epdf/."
+      },
+      "link_characteristics": [
+        "/doi/pdfdirect/{doi}",
+        "/doi/pdf/{doi}",
+        "/doi/epdf/{doi}",
+        "ignore supporting-information and pb-assets"
+      ],
+      "verification": {
+        "sample_doi": "10.1002/adfm.202525261",
+        "expected_domains": [
+          "onlinelibrary.wiley.com"
+        ],
+        "expected_pdf_markers": [
+          "/doi/pdfdirect/",
+          "/doi/pdf/",
+          "/doi/epdf/"
+        ]
+      }
+    },
+    "world-scientific": {
+      "profile_key": "world-scientific",
+      "display_name": "World Scientific",
+      "pdf_route_strategy": [
+        "doi_pdf_template",
+        "page_discovered_pdf_links"
+      ],
+      "identity": {
+        "anonymous_access": "open_access_articles_only",
+        "closed_access_requires": [
+          "institutional_ip_or_proxy",
+          "federated_sso_or_openathens",
+          "personal_or_library_subscription"
+        ],
+        "login_entry_hints": [
+          "Institutional Login",
+          "OpenAthens",
+          "Sign in"
+        ],
+        "challenge_risk": "medium"
+      },
+      "persistence": {
+        "stores": [
+          "browser_profile_dir",
+          "carsi_cookie_dir/world-scientific.json",
+          "attempt_cache"
+        ],
+        "preferred": "persistent_browser_profile",
+        "notes": "Consent and subscription cookies may be needed before /doi/pdf/ returns content."
+      },
+      "link_characteristics": [
+        "/doi/{doi}",
+        "/doi/pdf/{doi}",
+        "citation_pdf_url"
+      ],
+      "verification": {
+        "sample_doi": "10.1142/s0218194026500348",
+        "expected_domains": [
+          "worldscientific.com"
+        ],
+        "expected_pdf_markers": [
+          "/doi/pdf/"
+        ]
+      }
+    }
+  }
+}

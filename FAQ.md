@@ -1,46 +1,77 @@
-# FAQ / 常见问题
+# FAQ
 
-## 1. 主流期刊都有反爬虫功能，会不会受影响？
+## 1. 使用 InstSci 会不会触发出版社风控？
 
-基本不会。搜索走的是 Semantic Scholar、Unpaywall、arXiv 的**官方 API**，不是爬网页。获取付费论文走的是学校 WebVPN 代理，从出版商角度看就是一个正常用户在浏览器里打开论文。代码里还做了 2-5 秒随机延迟限速，不会触发风控。
+搜索阶段走 Semantic Scholar、Unpaywall、arXiv 等官方 API，不爬搜索网页。获取订阅论文时，InstSci 会通过你的学校/机构访问入口打开论文页面，并带有 2-5 秒随机延迟，尽量模拟正常人工访问。
 
 ## 2. 支持哪些学校？
 
-内置 100+ 中国高校配置，包括清华、北大、复旦、浙大、上海交大、大连理工、东北大学、吉林大学等。运行 `vpnsci schools` 查看完整列表。大部分学校使用默认加密密钥，少数学校（如大连理工、东北大学）使用自定义密钥，已内置支持。
-
-## 3. 如何切换学校？
+内置 100+ 中国高校和图书馆入口配置，包括清华、北大、复旦、浙大、上海交大、大连理工、东北大学、吉林大学等。运行：
 
 ```bash
-vpnsci config-cmd --school 大连理工大学
+instsci schools
 ```
 
-会自动设置 WebVPN 地址和加密密钥。用 `vpnsci schools` 查看可选学校。
+即可查看完整列表。
 
-## 4. Elsevier 网站经常提示人机验证，能顺利跳过吗？
-
-Elsevier 的反爬比较严格，通过 WebVPN 获取 Elsevier 论文可能会遇到 403。建议优先尝试 Unpaywall 的 OA 版本（程序会自动尝试）。如果 OA 没有，可以手动在浏览器中通过 WebVPN 下载 PDF。
-
-## 5. WebVPN session 会过期吗？
-
-会过期，通常几小时到一天（取决于学校设置）。过期后需要重新登录：
+## 3. 怎么配置学校？
 
 ```bash
-vpnsci login --force
+instsci config-cmd --school 大连理工大学
 ```
 
-可以在出门前运行 `vpnsci login` 预先登录保存 cookies。如果 session 过期，Open Access 和 arXiv 的论文仍然可以正常获取。
+程序会自动设置学校入口和所需参数。也可以手动指定入口地址：
 
-## 6. 浙大为什么不在列表里？
+```bash
+instsci config-cmd --access-url https://your-school-access.example.edu.cn
+```
 
-浙大的 WebVPN 使用动态密钥方案（登录后从 `/user/info` API 获取密钥），与其他学校的静态密钥不同。目前 vpnsci 只支持静态密钥的学校，动态密钥支持计划在未来版本中添加。
+## 4. Elsevier / ScienceDirect 获取失败怎么办？
 
-## 7. 加密密钥是怎么来的？
+Elsevier 对自动化访问比较严格。InstSci 会优先尝试开放版本和 Elsevier API；如果仍无法获取，可以在浏览器中完成机构登录后重试。
 
-大部分学校使用默认密钥 `wrdvpnisthebest!`。部分学校使用自定义密钥，这些数据来自开源项目 `lcandy2/webvpn-converter`。如果你的学校不在列表中但你知道它的密钥，可以手动编辑 `~/.vpnsci/config.json` 设置 `webvpn_base_url`。
+推荐先配置 Elsevier API：
 
-## 8. 需要安装什么环境？
+```bash
+instsci elsevier-setup --api-key YOUR_KEY
+```
 
-- Python >= 3.10
-- Chrome 浏览器（WebVPN CAS 登录需要）
-- 安装命令：`pip install -e .`
-- 注册到 Claude Code：`claude mcp add vpnsci -- vpnsci-mcp`
+如果你的机构提供 Elsevier institutional token，也可以一并配置：
+
+```bash
+instsci elsevier-setup --api-key YOUR_KEY --inst-token YOUR_TOKEN
+```
+
+## 5. 机构访问 session 会过期吗？
+
+会。学校/机构入口通常会在数小时到数天后过期。过期后重新登录即可：
+
+```bash
+instsci login --force
+```
+
+开放获取论文不依赖机构 session，仍然可以正常获取。
+
+## 6. 少数学校为什么需要本地连接器？
+
+部分学校要求先通过学校客户端建立本地访问环境。InstSci 不负责登录凭据，也不保存账号密码；你只需要在学校要求的客户端或兼容容器中完成登录，然后告诉 InstSci 本地 SOCKS5 地址：
+
+```bash
+instsci config-cmd --connector-url socks5://127.0.0.1:1080
+```
+
+## 7. 如果我的学校不在列表里？
+
+可以先用学校提供的图书馆或机构入口地址手动配置：
+
+```bash
+instsci config-cmd --access-url https://your-school-access.example.edu.cn
+```
+
+如果你愿意补充学校入口配置，可以在项目里添加一条数据并提交 PR。
+
+## 8. MCP 怎么注册？
+
+```bash
+claude mcp add instsci -- instsci-mcp
+```

@@ -1,6 +1,7 @@
 """Paper search via Semantic Scholar API."""
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 

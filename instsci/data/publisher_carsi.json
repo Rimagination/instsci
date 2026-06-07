@@ -29,9 +29,9 @@
   "ieee": {
     "name": "IEEE Xplore",
     "domains": ["ieeexplore.ieee.org"],
-    "login_url": "https://ieeexplore.ieee.org/servlet/wayf.jsp",
-    "search_selector": "input#institution-search, input[name='searchTerm']",
-    "result_selector": ".institution-list a, .wayf-results a",
+    "login_url": "https://ieeexplore.ieee.org/Xplore/home.jsp",
+    "search_selector": "input[aria-label='Search for your Institution'], input.inst-typeahead-input, input[aria-label*='Institution']",
+    "result_selector": "button:has-text('Tsinghua University'), [role='button']:has-text('Tsinghua University'), [role='option']:has-text('Tsinghua University'), li:has-text('Tsinghua University')",
     "success_url_pattern": "ieeexplore.ieee.org",
     "pdf_pattern": "/stamp/stamp.jsp?arnumber={article_id}"
   },

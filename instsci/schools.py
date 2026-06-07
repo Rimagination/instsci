@@ -1,4 +1,4 @@
-"""School database for multi-university WebVPN support."""
+"""School database for multi-university institutional access support."""
 
 import json
 from dataclasses import dataclass
@@ -14,19 +14,19 @@ _schools_cache: list["SchoolEntry"] | None = None
 
 @dataclass
 class SchoolEntry:
-    """A university's VPN configuration."""
+    """A university's institutional access configuration."""
 
     name: str           # e.g. "清华大学"
     province: str       # e.g. "北京"
-    host: str           # e.g. "https://webvpn.tsinghua.edu.cn"
-    key: bytes          # AES encryption key (WebVPN only)
-    iv: bytes           # AES encryption IV (WebVPN only)
+    host: str           # Campus/library access URL.
+    key: bytes          # AES encryption key for campus gateway URLs.
+    iv: bytes           # AES encryption IV for campus gateway URLs.
     school_type: str = "webvpn"  # "webvpn", "easyconnect", "atrust", or "ezproxy"
     gateway: str = ""   # EasyConnect/aTrust gateway domain (e.g. "otrust.ouc.edu.cn")
 
 
 def _load_db() -> dict:
-    """Load the webvpn.json database."""
+    """Load the campus access database."""
     if not _DATA_FILE.exists():
         return {}
     return json.loads(_DATA_FILE.read_text(encoding="utf-8"))
@@ -119,5 +119,5 @@ def get_school(name: str) -> SchoolEntry:
 
     raise ValueError(
         f"School not found: '{name}'. "
-        f"Use 'vpnsci schools' to list available schools."
+        f"Use 'instsci schools' to list available schools."
     )

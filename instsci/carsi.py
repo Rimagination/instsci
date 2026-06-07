@@ -2,7 +2,6 @@
 
 import json
 import logging
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -11,12 +10,15 @@ import requests
 
 try:
     from cloakbrowser import launch
+    from .cloakbrowser_compat import ensure_cloakbrowser_platform_compatible
+    ensure_cloakbrowser_platform_compatible()
     _HAS_CLOAKBROWSER = True
 except ImportError:
     launch = None  # type: ignore[assignment]
     _HAS_CLOAKBROWSER = False
 
 from .config import Config
+from .session_store import CookieStore
 
 logger = logging.getLogger(__name__)
 
@@ -108,22 +110,9 @@ class CARSIClient:
 
     def _try_load_cookies(self, publisher: str) -> bool:
         cookie_file = self._cookie_path(publisher)
-        if not cookie_file.exists():
-            return False
-        try:
-            cookies = json.loads(cookie_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("Failed to read CARSI cookies for %s: %s", publisher, e)
-            return False
-
         sess = self._get_session(publisher)
-        for cookie in cookies:
-            sess.cookies.set(
-                cookie["name"],
-                cookie["value"],
-                domain=cookie.get("domain", ""),
-                path=cookie.get("path", "/"),
-            )
+        if not CookieStore(cookie_file).load_into(sess):
+            return False
         return self._validate_session(publisher)
 
     def _validate_session(self, publisher: str) -> bool:
@@ -279,19 +268,7 @@ class CARSIClient:
     def _save_cookies(self, publisher: str, cookies: list[dict]) -> None:
         """Save cookies to the CARSI cookie file for the given publisher."""
         cookie_file = self._cookie_path(publisher)
-        cookie_file.parent.mkdir(parents=True, exist_ok=True)
-
-        # Filter out expired cookies
-        now = time.time()
-        valid_cookies = [
-            c for c in cookies
-            if not c.get("expires") or c.get("expires", 0) == 0 or c.get("expires", 0) > now
-        ]
-
-        cookie_file.write_text(
-            json.dumps(valid_cookies, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        valid_cookies = CookieStore(cookie_file).save(cookies)
         logger.info("Saved %d CARSI cookies for %s", len(valid_cookies), publisher)
 
     def close(self):
