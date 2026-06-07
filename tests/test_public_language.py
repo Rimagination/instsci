@@ -70,6 +70,16 @@ class PublicLanguageTests(unittest.TestCase):
         self.assertIn("publisher-doctor", text)
         self.assertIn("HTTP preflight", text)
 
+    def test_agents_exposes_actionable_publisher_pdf_workflow(self):
+        text = Path("AGENTS.md").read_text(encoding="utf-8")
+
+        self.assertIn("## Agent Workflow", text)
+        self.assertIn("Classify the task", text)
+        self.assertIn("instsci papers", text)
+        self.assertIn("instsci publisher-batch", text)
+        self.assertIn("Evidence Standard", text)
+        self.assertIn("Report Template", text)
+
     def test_setup_help_exposes_one_step_environment_setup(self):
         result = self.runner.invoke(app, ["setup", "--help"])
 

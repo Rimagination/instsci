@@ -35,13 +35,14 @@ desktop.ini
 .env.local
 .env.*.local
 
-# Runtime data (created in ~/.vpnsci/)
+# Runtime data (created by InstSci)
 cookies.json
 config.json
 chrome-profile/
 .chrome-sciencedirect/
 downloads/
 .tmp/
+instsci/_browsers/
 
 # Testing / Coverage
 .coverage

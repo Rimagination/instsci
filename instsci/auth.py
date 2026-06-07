@@ -11,9 +11,9 @@ import requests
 from Crypto.Cipher import AES
 
 try:
+    from .cloakbrowser_compat import prepare_cloakbrowser_runtime
+    prepare_cloakbrowser_runtime()
     from cloakbrowser import launch
-    from .cloakbrowser_compat import ensure_cloakbrowser_platform_compatible
-    ensure_cloakbrowser_platform_compatible()
     _HAS_CLOAKBROWSER = True
 except ImportError:
     launch = None  # type: ignore[assignment]
@@ -198,6 +198,7 @@ class WebVPNAuth:
 
         try:
             # Use persistent context to keep the campus session alive across runs.
+            prepare_cloakbrowser_runtime()
             from cloakbrowser import launch_persistent_context
             profile_dir = self.config.chrome_profile_dir
             Path(profile_dir).mkdir(parents=True, exist_ok=True)

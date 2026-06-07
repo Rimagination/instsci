@@ -24,6 +24,8 @@ pip install -e .
 
 当前命令和包名是 `instsci`；旧的 `vpnsci.*` Python import 仍保留兼容。
 
+CloakBrowser 浏览器由 InstSci 缓存在项目内的 `instsci/_browsers/cloakbrowser`，该目录不会提交到 Git。
+
 ### 快速开始
 
 ```bash
@@ -70,6 +72,8 @@ pip install -e .
 ```
 
 The current command and package name is `instsci`; legacy `vpnsci.*` Python imports remain compatible.
+
+InstSci caches the CloakBrowser binary inside `instsci/_browsers/cloakbrowser`; that directory is not committed to Git.
 
 ### Quick Start
 

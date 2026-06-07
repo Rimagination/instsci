@@ -9,9 +9,9 @@ from urllib.parse import urlparse
 import requests
 
 try:
+    from .cloakbrowser_compat import prepare_cloakbrowser_runtime
+    prepare_cloakbrowser_runtime()
     from cloakbrowser import launch
-    from .cloakbrowser_compat import ensure_cloakbrowser_platform_compatible
-    ensure_cloakbrowser_platform_compatible()
     _HAS_CLOAKBROWSER = True
 except ImportError:
     launch = None  # type: ignore[assignment]

@@ -23,9 +23,9 @@ from .publisher_profiles import infer_publisher_profile, infer_publisher_profile
 from .sources import arxiv, unpaywall
 
 try:
+    from .cloakbrowser_compat import prepare_cloakbrowser_runtime
+    prepare_cloakbrowser_runtime()
     import cloakbrowser  # noqa: F401 — check availability
-    from .cloakbrowser_compat import ensure_cloakbrowser_platform_compatible
-    ensure_cloakbrowser_platform_compatible()
     _HAS_CLOAKBROWSER = True
 except ImportError:
     _HAS_CLOAKBROWSER = False

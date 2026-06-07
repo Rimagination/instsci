@@ -2,6 +2,52 @@
 
 These rules define the project-level behavior expected from AI agents working in this repository.
 
+## Agent Workflow
+
+Use this workflow whenever a user asks to download PDFs, test publisher access, build a publisher capability matrix, diagnose closed-access retrieval, or make a final statement about whether a publisher can provide a PDF.
+
+1. Classify the task.
+   - Metadata search, Open Access lookup, DOI resolution, or route discovery may use normal HTTP tools.
+   - Publisher PDF download, closed-access verification, or publisher capability verdicts require the built-in visible CloakBrowser workflow.
+2. Load the access policy before choosing an identity route.
+   - Read `instsci/data/institutional_identity_policy.json`, or run `instsci identity-policy`.
+   - If `--institution`, `config.carsi_idp_name`, and `config.school` are all empty, ask for the user's own subscription institution.
+3. Choose the least surprising route.
+   - Prefer publisher broker / Shibboleth / OpenAthens / CARSI institution login when supported.
+   - Use WebVPN only when the configured institution has a WebVPN gateway and that publisher path is browser-verified through the gateway.
+   - If WebVPN fails, try the publisher article-page institutional login flow before marking the publisher failed.
+4. Run a browser-backed workflow for final PDF evidence.
+   - DOI list or auto publisher selection: `instsci papers dois.txt --publisher auto --institution "Institution Name" --output ./runs/papers`.
+   - Known publisher profile: `instsci publisher-batch dois.txt --publisher acs --institution "Institution Name" --output ./runs/acs`.
+   - Code-level automation may use `PublisherBatchDownloader`, `ACSCloakBatchDownloader`, or the same built-in browser context.
+5. Keep the browser visible.
+   - Do not hide the CloakBrowser window during SSO, 2FA, CAPTCHA, Cloudflare, WAF checks, or publisher verification.
+   - Let the user complete institution checks manually. Wait, resume, and reuse `browser_profile_dir`, `carsi_cookie_dir/<publisher>.json`, and `attempt_cache`.
+6. Verify with visual evidence.
+   - After clicking `PDF`, `Institutional Access`, `Institutional Sign In`, OpenAthens, cookie prompts, or verification prompts, inspect a screenshot of the visible CloakBrowser window.
+   - Do not conclude success or failure from DOM events, URLs, logs, cookies, or HTTP responses alone.
+
+## Evidence Standard
+
+| Label | Allowed Evidence | Final Publisher PDF Verdict |
+| --- | --- | --- |
+| `HTTP preflight` | `publisher-doctor`, `requests`, `curl`, DOI resolution, route templates, candidate URL construction | No |
+| `browser verified` | PDF captured or blocked in the visible built-in CloakBrowser workflow, with screenshot-backed interaction checkpoints | Yes |
+
+Do not mark a publisher unsupported, failed, or verified unless the conclusion comes from `browser verified` evidence.
+
+## Report Template
+
+For publisher PDF work, report each publisher or DOI with:
+
+- `publisher`
+- `doi`
+- `route_attempted`
+- `institution`
+- `result`: `browser verified`, `HTTP preflight`, `auth_required`, `blocked`, or `unsupported`
+- `evidence`: captured PDF path, screenshot path, diagnostic path, or exact blocker
+- `next_action`: what the user or agent should try next
+
 ## Mandatory Publisher PDF Browser Rule
 
 - For any publisher PDF download, publisher PDF capability matrix, closed-access verification, or final statement about whether a publisher can provide a PDF, agents MUST use InstSci's built-in CloakBrowser workflow.
