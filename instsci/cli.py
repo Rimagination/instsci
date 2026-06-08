@@ -1074,7 +1074,6 @@ def config_cmd(
     set_proxy_url: str = typer.Option("", "--proxy-url", help="Legacy local connector URL option.", hidden=True),
     set_elsevier_key: str = typer.Option("", "--elsevier-api-key", help="Set Elsevier API key."),
     set_elsevier_token: str = typer.Option("", "--elsevier-inst-token", help="Set Elsevier institutional token."),
-    set_flaresolverr: str = typer.Option("", "--flaresolverr-url", help="Set FlareSolverr URL."),
     set_federated_enable: bool = typer.Option(False, "--federated-enable", help="Enable federated institutional auth."),
     set_federated_disable: bool = typer.Option(False, "--federated-disable", help="Disable federated institutional auth."),
     set_federated_school: str = typer.Option("", "--federated-school", help="Set school name for federated login."),
@@ -1132,11 +1131,6 @@ def config_cmd(
         changed = True
         console.print("[green]Elsevier institutional token saved.[/green]")
 
-    if set_flaresolverr:
-        cfg.flaresolverr_url = set_flaresolverr.rstrip("/")
-        changed = True
-        console.print(f"[green]FlareSolverr URL set to: {set_flaresolverr}[/green]")
-
     federated_enable = set_federated_enable or set_carsi_enable
     federated_disable = set_federated_disable or set_carsi_disable
     federated_school = set_federated_school or set_carsi_school
@@ -1161,7 +1155,7 @@ def config_cmd(
 
     has_setter = any([set_email, set_output, set_access_url, set_webvpn_url, set_school,
                       set_connector_url, set_proxy_url,
-                       set_elsevier_key, set_elsevier_token, set_flaresolverr,
+                       set_elsevier_key, set_elsevier_token,
                        set_federated_enable, set_federated_disable, set_federated_school,
                        set_carsi_enable, set_carsi_disable, set_carsi_school])
     if show and not has_setter:
@@ -1180,7 +1174,6 @@ def config_cmd(
         console.print(f"  Email:             {cfg.email}")
         console.print(f"  Elsevier API key:  {'****' if cfg.elsevier_api_key else '(not set)'}")
         console.print(f"  Elsevier inst tok: {'****' if cfg.elsevier_inst_token else '(not set)'}")
-        console.print(f"  FlareSolverr URL:  {cfg.flaresolverr_url}")
         console.print(f"  Federated login:   {'Yes' if cfg.carsi_enabled else 'No'}")
         console.print(f"  Federated school:  {cfg.carsi_idp_name or '(not set)'}")
         console.print(f"  Output dir:        {cfg.output_dir}")

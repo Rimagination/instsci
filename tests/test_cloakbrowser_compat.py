@@ -5,6 +5,8 @@ import types
 import unittest
 from unittest.mock import patch
 
+from tests.project_guards import find_project_reference_offenders
+
 
 class CloakBrowserCompatTests(unittest.TestCase):
     def test_empty_windows_machine_is_mapped_to_windows_x64(self):
@@ -49,27 +51,15 @@ class CloakBrowserCompatTests(unittest.TestCase):
 
     def test_project_has_no_legacy_browser_references(self):
         root = Path(__file__).resolve().parents[1]
-        ignored_dirs = {
-            ".git",
-            ".venv",
-            ".pytest_cache",
-            "_browsers",
-            "downloads",
-            ".tmp",
-            "vpnsci.egg-info",
-        }
-        suffixes = {".py", ".md", ".toml", ".json", ".yml", ".yaml", ".txt"}
         legacy_names = ("camo" + "fox", "camou" + "fox")
-        offenders = []
+        offenders = find_project_reference_offenders(root, legacy_names)
 
-        for path in root.rglob("*"):
-            if any(part in ignored_dirs for part in path.parts):
-                continue
-            if not path.is_file() or path.suffix.lower() not in suffixes:
-                continue
-            text = path.read_text(encoding="utf-8", errors="ignore").lower()
-            if any(name in text for name in legacy_names):
-                offenders.append(str(path.relative_to(root)))
+        self.assertEqual(offenders, [])
+
+    def test_project_has_no_removed_challenge_service_references(self):
+        root = Path(__file__).resolve().parents[1]
+        removed_names = ("flare" + "solverr",)
+        offenders = find_project_reference_offenders(root, removed_names)
 
         self.assertEqual(offenders, [])
 

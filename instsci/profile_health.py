@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import DEFAULT_BASE_DIR, LEGACY_BASE_DIR, Config
+from .config import DEFAULT_BASE_DIR, Config
 
 
 DEFAULT_SESSION_DOMAINS = (
@@ -45,8 +45,6 @@ def candidate_profile_dirs(config: Config, *, workspace: Path | None = None) -> 
     candidates = [
         Path(config.chrome_profile_dir) if config.chrome_profile_dir else None,
         DEFAULT_BASE_DIR / "chrome-profile",
-        LEGACY_BASE_DIR / "chrome-profile",
-        LEGACY_BASE_DIR / "browser_profile",
     ]
     if workspace is not None:
         candidates.append(workspace / ".chrome-sciencedirect")

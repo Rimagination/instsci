@@ -16,12 +16,6 @@ class InstSciImportTests(unittest.TestCase):
         self.assertEqual(PaperFetcher.__module__, "instsci.fetcher")
         self.assertEqual(Paper.__module__, "instsci.models")
 
-    def test_legacy_vpnsci_imports_alias_new_modules(self):
-        import instsci.fetcher
-        import vpnsci.fetcher
-
-        self.assertIs(vpnsci.fetcher, instsci.fetcher)
-
 
 if __name__ == "__main__":
     unittest.main()
