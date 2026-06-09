@@ -25,6 +25,15 @@ This reference is for InstSci publisher PDF retrieval, closed-access verificatio
    - Screenshots are required after important UI actions.
    - DOM events, URLs, logs, and cookies are supporting evidence only.
 
+## MCP And Skill Handoff
+
+- Let the skill decide whether a task is metadata/OA work, HTTP preflight, or final publisher PDF evidence.
+- Use MCP tools for structured context first: `get_institutional_identity_policy`, `get_publisher_access_catalog`, and `get_publisher_browser_verification_matrix`.
+- Use `plan_publisher_pdf_workflow` to produce the visible CLI command and to detect missing subscription institution context.
+- Do not use MCP `fetch_paper`, HTTP probes, cookie replay, or direct request results as final closed-access publisher PDF verdicts.
+- Once a task needs final PDF evidence, start or resume `instsci papers` / `instsci publisher-batch` and keep the CloakBrowser visible for user login and visual checkpoints.
+- If MCP context differs from `AGENTS.md` or `instsci/data/*.json`, prefer the repository files and report the mismatch.
+
 ## Recent Gotchas
 
 - Elsevier institution entry must not click `Go to Elsevier Homepage` while trying to select an institution.

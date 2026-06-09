@@ -20,6 +20,19 @@ Use this skill as the project entry point for InstSci work. The implementation a
 instsci identity-policy
 ```
 
+## MCP Coordination
+
+When InstSci MCP tools are available, use them as the structured context bridge before reading raw JSON files by hand:
+
+- `get_institutional_identity_policy`: load route-selection policy before closed-access planning.
+- `get_publisher_access_catalog`: inspect publisher route templates, login hints, persistence stores, and HTTP preflight limits.
+- `get_publisher_browser_verification_matrix`: inspect prior browser-backed publisher evidence.
+- `plan_publisher_pdf_workflow`: build the correct visible CLI command and identify whether a subscription institution is still required.
+
+Use MCP `search_papers`, `get_paper_metadata`, and `fetch_paper` for metadata, Open Access lookup, DOI resolution, or non-final retrieval attempts. For publisher PDF downloads, closed-access verification, capability matrices, or final support verdicts, MCP is planning/context only; the actual evidence must come from the visible CloakBrowser workflow started by `instsci papers`, `instsci publisher-batch`, `PublisherBatchDownloader`, or `ACSCloakBatchDownloader`.
+
+If MCP output and repository files disagree, treat `AGENTS.md` plus `instsci/data/*.json` as the source of truth and mention the mismatch.
+
 ## Evidence Standard
 
 Final publisher PDF verdicts require the visible built-in CloakBrowser workflow. `curl`, `requests`, DOI resolution, `publisher-doctor`, route construction, logs, DOM state, URLs, and cookie exports are HTTP preflight only.
