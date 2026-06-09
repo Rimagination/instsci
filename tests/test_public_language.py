@@ -1,6 +1,7 @@
 import tomllib
 import unittest
 from pathlib import Path
+from subprocess import CompletedProcess
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -63,6 +64,38 @@ class PublicLanguageTests(unittest.TestCase):
         self.assertIn("verify", result.output.lower())
         self.assertIn("HTTP preflight", result.output)
         self.assertIn("browser", result.output.lower())
+
+    def test_doctor_help_exposes_runtime_and_dependency_checks(self):
+        result = self.runner.invoke(app, ["doctor", "--help"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("runtime", result.output.lower())
+        self.assertIn("dependencies", result.output.lower())
+
+    def test_doctor_reports_dependency_conflicts_without_mutating_environment(self):
+        pip_check = CompletedProcess(
+            args=[sys.executable, "-m", "pip", "check"],
+            returncode=1,
+            stdout="demo-package 1.0 has requirement PyMuPDF>=1.27, but you have pymupdf 1.24.14.\n",
+            stderr="",
+        )
+
+        with patch("subprocess.run", return_value=pip_check), \
+             patch("shutil.which", side_effect=lambda name: f"C:/Tools/{name}.exe"), \
+             patch("importlib.metadata.version", side_effect=lambda name: "1.24.14" if name == "pymupdf" else "0.3.31"):
+            result = self.runner.invoke(app, ["doctor"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("InstSci Doctor", result.output)
+        self.assertIn("dependency conflicts", result.output.lower())
+        self.assertIn("pipx install instsci", result.output)
+
+    def test_readme_recommends_isolated_tool_install_for_users(self):
+        text = Path("README.md").read_text(encoding="utf-8")
+
+        self.assertIn("pipx install instsci", text)
+        self.assertIn("uv tool install instsci", text)
+        self.assertIn("Development install", text)
 
     def test_agents_requires_builtin_browser_for_publisher_pdf_verdicts(self):
         text = Path("AGENTS.md").read_text(encoding="utf-8")

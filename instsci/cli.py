@@ -1,8 +1,11 @@
 """CLI interface for InstSci."""
 
+import importlib.metadata
 import json
 import logging
 import os
+import shutil
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -162,6 +165,81 @@ def _show_setup_check(cfg: Config) -> bool:
         table.add_row(label, f"[{style}]{status}[/{style}]", detail)
     console.print(table)
     return ready
+
+
+def _installed_package_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return ""
+
+
+def _run_pip_check() -> tuple[str, str]:
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "check"],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return "warning", f"pip check unavailable: {exc}"
+
+    output = (result.stdout or result.stderr or "").strip()
+    if result.returncode == 0:
+        return "ok", output or "No dependency conflicts"
+    first_line = output.splitlines()[0] if output else f"pip check exited {result.returncode}"
+    return "warning", f"dependency conflicts: {first_line}"
+
+
+def _doctor_checks() -> list[tuple[str, str, str]]:
+    checks: list[tuple[str, str, str]] = [
+        ("Python runtime", "ok", sys.executable),
+        ("User install", "info", "Recommended: pipx install instsci or uv tool install instsci"),
+    ]
+
+    for command in ("instsci", "instsci-mcp"):
+        path = shutil.which(command)
+        checks.append((command, "ok" if path else "warning", path or "not found on PATH"))
+
+    for package in ("instsci", "pymupdf", "cloakbrowser"):
+        version = _installed_package_version(package)
+        checks.append((f"package: {package}", "ok" if version else "warning", version or "not installed"))
+
+    try:
+        from .cloakbrowser_compat import configure_builtin_cloakbrowser
+
+        cache_dir = configure_builtin_cloakbrowser(create_dir=False)
+        status = "ok" if cache_dir.exists() else "warning"
+        detail = str(cache_dir) if cache_dir.exists() else f"not downloaded yet: {cache_dir}"
+    except Exception as exc:
+        status = "warning"
+        detail = f"cache check failed: {exc}"
+    checks.append(("CloakBrowser cache", status, detail))
+
+    pip_status, pip_detail = _run_pip_check()
+    checks.append(("Dependencies", pip_status, pip_detail))
+    return checks
+
+
+@app.command("doctor")
+def doctor():
+    """Inspect InstSci runtime, dependencies, command shims, and browser cache."""
+    table = Table(title="InstSci Doctor")
+    table.add_column("Item", width=24)
+    table.add_column("Status", width=10)
+    table.add_column("Detail", overflow="fold")
+
+    styles = {"ok": "green", "warning": "yellow", "info": "cyan"}
+    for label, status, detail in _doctor_checks():
+        style = styles.get(status, "white")
+        table.add_row(label, f"[{style}]{status}[/{style}]", detail)
+
+    console.print(table)
 
 
 @app.command()
