@@ -1,3 +1,4 @@
+import json
 import inspect
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -110,6 +111,71 @@ class FetcherElsevierApiTests(unittest.TestCase):
 
         self.assertEqual(result.source, "elsevier_api")
         self.assertEqual(calls, ["api"])
+
+    def test_browser_pdf_fallback_uses_profile_downloader(self):
+        fetcher = RecordingFetcher()
+        self.addCleanup(fetcher.close)
+        paper = Paper(
+            doi="10.1016/j.watres.2024.121507",
+            url="https://www.sciencedirect.com/science/article/pii/S0043135424004093",
+        )
+        captured: dict[str, object] = {}
+
+        class FakeAuth:
+            browser_context = None
+
+            def login(self, force: bool = False) -> bool:
+                captured["legacy_login_force"] = force
+                return False
+
+            def close(self) -> None:
+                pass
+
+        class FakeDownloader:
+            def __init__(self, config, *, profile, institution_query="", **kwargs):
+                captured["config"] = config
+                captured["profile_name"] = profile.name
+                captured["institution_query"] = institution_query
+                captured["kwargs"] = kwargs
+
+            def run_records(self, records, run_dir, **kwargs):
+                captured["records"] = records
+                captured["run_dir"] = Path(run_dir)
+                captured["run_kwargs"] = kwargs
+                pdf_path = Path(run_dir) / "complete" / "pdfs" / "paper.pdf"
+                pdf_path.parent.mkdir(parents=True, exist_ok=True)
+                pdf_path.write_bytes(b"%PDF-" + b"x" * 12000)
+                manifest_path = Path(run_dir) / "complete" / "manifest.json"
+                manifest_path.write_text(
+                    json.dumps(
+                        [
+                            {
+                                "doi": paper.doi,
+                                "status": "success",
+                                "pdf_path": str(pdf_path),
+                                "text_length": 1200,
+                                "verified_match": True,
+                            }
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                return {"manifest": str(Path(run_dir) / "complete" / "manifest.csv")}
+
+        fetcher._auth = FakeAuth()
+
+        with patch("instsci.publisher_batch.PublisherBatchDownloader", FakeDownloader), \
+             patch("instsci.fetcher.pdf_extractor.extract_text", return_value="browser text " * 120):
+            result = fetcher._try_browser_pdf_download(paper.doi, paper.url, paper)
+
+        self.assertIs(result, paper)
+        self.assertEqual(result.source, "browser")
+        self.assertIn("browser text", result.full_text)
+        self.assertTrue(result.pdf_path.endswith("paper.pdf"))
+        self.assertEqual(captured["profile_name"], "Elsevier")
+        self.assertEqual(captured["records"][0].doi, paper.doi)
+        self.assertEqual(captured["run_kwargs"]["target_verified"], 1)
+        self.assertNotIn("legacy_login_force", captured)
 
 
 if __name__ == "__main__":

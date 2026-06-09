@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from instsci.config import Config
+from instsci.config import DEFAULT_BASE_DIR, Config
 from instsci.profile_health import (
     CHROME_EPOCH_OFFSET_SECONDS,
     candidate_profile_dirs,
@@ -88,9 +88,14 @@ class ProfileHealthTests(unittest.TestCase):
 
         candidates = candidate_profile_dirs(cfg, workspace=Path("workspace"))
 
-        self.assertEqual(candidates[0], Path("chosen-profile"))
-        self.assertEqual(len(candidates), len({str(path) for path in candidates}))
-        self.assertIn(Path("workspace") / ".chrome-sciencedirect", candidates)
+        self.assertEqual(
+            candidates,
+            [
+                Path("chosen-profile"),
+                DEFAULT_BASE_DIR / "chrome-profile",
+                Path("workspace") / ".chrome-sciencedirect",
+            ],
+        )
 
 
 if __name__ == "__main__":

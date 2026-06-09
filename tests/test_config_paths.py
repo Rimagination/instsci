@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -19,25 +18,22 @@ class ConfigPathTests(unittest.TestCase):
             self.assertEqual(Path(cfg.cache_dir), base / "cache")
             self.assertEqual(Path(cfg.cookie_path), base / "cookies.json")
 
-    def test_load_falls_back_to_legacy_config_when_new_config_missing(self):
+    def test_load_uses_inst_sci_config_path(self):
         with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            new_base = root / ".instsci"
-            legacy_base = root / ".vpnsci"
-            legacy_base.mkdir()
-            (legacy_base / "config.json").write_text(
-                json.dumps({"school": "Legacy University", "email": "old@example.edu"}),
+            base = Path(tmp) / ".instsci"
+            base.mkdir()
+            (base / "config.json").write_text(
+                '{"school": "InstSci University", "email": "reader@example.edu"}',
                 encoding="utf-8",
             )
 
-            with patch.object(config_module, "DEFAULT_BASE_DIR", new_base), \
-                 patch.object(config_module, "LEGACY_BASE_DIR", legacy_base):
+            with patch.object(config_module, "DEFAULT_BASE_DIR", base):
                 cfg = Config.load()
                 cfg.save()
 
-            self.assertEqual(cfg.school, "Legacy University")
-            self.assertEqual(cfg.email, "old@example.edu")
-            self.assertTrue((new_base / "config.json").exists())
+            self.assertEqual(cfg.school, "InstSci University")
+            self.assertEqual(cfg.email, "reader@example.edu")
+            self.assertTrue((base / "config.json").exists())
 
 
 if __name__ == "__main__":

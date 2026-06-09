@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 import instsci.config as config_module
 from instsci.cli import app
 from instsci.config import Config
+from tests.project_guards import find_project_reference_offenders
 
 
 class PublicLanguageTests(unittest.TestCase):
@@ -80,6 +81,13 @@ class PublicLanguageTests(unittest.TestCase):
         self.assertIn("Evidence Standard", text)
         self.assertIn("Report Template", text)
 
+    def test_project_has_no_retired_package_name_references(self):
+        root = Path(__file__).resolve().parents[1]
+        retired_names = ("vpn" + "sci",)
+        offenders = find_project_reference_offenders(root, retired_names, include_paths=True)
+
+        self.assertEqual(offenders, [])
+
     def test_setup_help_exposes_one_step_environment_setup(self):
         result = self.runner.invoke(app, ["setup", "--help"])
 
@@ -92,9 +100,7 @@ class PublicLanguageTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             base = Path(tmp) / ".instsci"
             output_dir = Path(tmp) / "papers"
-            legacy_base = Path(tmp) / ".vpnsci"
-            with patch.object(config_module, "DEFAULT_BASE_DIR", base), \
-                    patch.object(config_module, "LEGACY_BASE_DIR", legacy_base):
+            with patch.object(config_module, "DEFAULT_BASE_DIR", base):
                 result = self.runner.invoke(
                     app,
                     [
@@ -121,9 +127,7 @@ class PublicLanguageTests(unittest.TestCase):
     def test_setup_check_reports_missing_school_without_saving_new_config(self):
         with TemporaryDirectory() as tmp:
             base = Path(tmp) / ".instsci"
-            legacy_base = Path(tmp) / ".vpnsci"
-            with patch.object(config_module, "DEFAULT_BASE_DIR", base), \
-                    patch.object(config_module, "LEGACY_BASE_DIR", legacy_base):
+            with patch.object(config_module, "DEFAULT_BASE_DIR", base):
                 result = self.runner.invoke(app, ["setup", "--check"])
 
             self.assertEqual(result.exit_code, 2, result.output)

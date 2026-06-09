@@ -279,6 +279,96 @@ class FetcherResultTests(unittest.TestCase):
 
 
 class MCPFetchResultTests(unittest.TestCase):
+    def test_mcp_exposes_institutional_identity_policy(self):
+        from instsci import mcp_server
+
+        payload = json.loads(
+            asyncio.run(mcp_server.get_institutional_identity_policy(format="json"))
+        )
+
+        self.assertEqual(payload["default_mode"], "auto")
+        self.assertEqual(payload["final_pdf_verdict_requires"], "visible_cloakbrowser")
+        self.assertEqual(payload["subscription_institution"]["hardcoded_default"], "")
+
+    def test_mcp_exposes_selected_publisher_access_catalog(self):
+        from instsci import mcp_server
+
+        payload = json.loads(
+            asyncio.run(mcp_server.get_publisher_access_catalog("elsevier", format="json"))
+        )
+
+        self.assertEqual(payload["scope"], "route knowledge and HTTP preflight context only")
+        self.assertEqual(payload["publisher"]["profile_key"], "elsevier")
+        self.assertIn("federated_sso_or_openathens", payload["publisher"]["identity"]["closed_access_requires"])
+
+    def test_mcp_exposes_browser_verification_matrix(self):
+        from instsci import mcp_server
+
+        payload = json.loads(
+            asyncio.run(
+                mcp_server.get_publisher_browser_verification_matrix("wiley", format="json")
+            )
+        )
+
+        self.assertEqual(payload["verdict_source"], "InstSci built-in CloakBrowser workflow")
+        self.assertIn("not HTTP preflight", payload["scope"])
+        self.assertEqual(payload["publisher"]["profile_key"], "wiley")
+        self.assertIn("browser_verified", payload["publisher"])
+
+    def test_mcp_plans_visible_browser_workflow_without_default_institution(self):
+        from instsci import mcp_server
+
+        with TemporaryDirectory() as tmp:
+            config = _config(Path(tmp), school="")
+            with patch.object(mcp_server.Config, "load", return_value=config):
+                payload = json.loads(
+                    asyncio.run(
+                        mcp_server.plan_publisher_pdf_workflow(
+                            "dois.txt",
+                            publisher="auto",
+                            output="runs/papers",
+                            format="json",
+                        )
+                    )
+                )
+
+        self.assertEqual(payload["status"], "institution_required")
+        self.assertEqual(payload["workflow"], "visible_cloakbrowser")
+        self.assertTrue(payload["requires_visible_cloakbrowser"])
+        self.assertEqual(payload["publisher"], "auto")
+        self.assertNotIn("command", payload)
+        self.assertIn("instsci papers dois.txt --publisher auto", payload["command_template"])
+        self.assertIn("Institution Name", payload["command_template"])
+        self.assertNotIn("Tsinghua", payload["command_template"])
+
+    def test_mcp_plans_named_publisher_workflow_with_explicit_institution(self):
+        from instsci import mcp_server
+
+        with TemporaryDirectory() as tmp:
+            config = _config(Path(tmp), school="")
+            with patch.object(mcp_server.Config, "load", return_value=config):
+                payload = json.loads(
+                    asyncio.run(
+                        mcp_server.plan_publisher_pdf_workflow(
+                            "D:/runs/dois.txt",
+                            publisher="elsevier",
+                            institution="Example University",
+                            output="D:/runs/elsevier",
+                            format="json",
+                        )
+                    )
+                )
+
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["workflow_command"], "instsci publisher-batch")
+        self.assertEqual(payload["publisher"], "elsevier")
+        self.assertEqual(payload["institution"]["source"], "explicit")
+        self.assertEqual(payload["institution"]["value"], "Example University")
+        self.assertIn("instsci publisher-batch D:/runs/dois.txt", payload["command"])
+        self.assertIn("--publisher elsevier", payload["command"])
+        self.assertIn("'Example University'", payload["command"])
+        self.assertEqual(payload["final_pdf_verdict_requires"], "visible_cloakbrowser")
+
     def test_fetch_paper_json_returns_structured_result(self):
         from instsci import mcp_server
 

@@ -397,6 +397,7 @@ class PublisherBatchDownloader:
             user_data_dir=str(profile_path),
             headless=False,
             humanize=True,
+            accept_downloads=True,
             args=["--disable-features=CrossOriginOpenerPolicy"],
         )
 
@@ -685,6 +686,8 @@ class PublisherBatchDownloader:
             return True
         if self._click_elsevier_institution_entry(page, result):
             return True
+        if self._click_wiley_institution_login_entry(page, result):
+            return True
         sso_selectors = (
             "button:has-text('Access Through Your Institution')",
             "button:has-text('Access through your institution')",
@@ -761,6 +764,7 @@ class PublisherBatchDownloader:
                   const matches = (el) => {
                     const text = textOf(el);
                     const href = ((el.href || el.getAttribute('href') || el.getAttribute('formaction') || '') + '').toLowerCase();
+                    if (text.length > 300 && !href.includes('ssostart')) return false;
                     return exactMarkers.some(marker => text.includes(marker) || href.includes(marker))
                         || markers.some(marker => text.includes(marker) || href.includes(marker))
                         || href.includes('ssostart');
@@ -781,13 +785,6 @@ class PublisherBatchDownloader:
                       if (detail) return detail;
                     }
                   }
-                  for (const el of candidates) {
-                    const matched = matches(el);
-                    if (matched) {
-                      const detail = clickMatched(el);
-                      if (detail) return detail;
-                    }
-                  }
                   return null;
                 }
                 """,
@@ -801,6 +798,61 @@ class PublisherBatchDownloader:
             if result is not None:
                 self._event(result, "sso_entry_error", f"{type(exc).__name__}: {exc}")
             return False
+        return False
+
+    def _click_wiley_institution_login_entry(self, page: Any, result: DownloadResult | None = None) -> bool:
+        if self.profile.name.lower() != "wiley":
+            return False
+        try:
+            detail = page.evaluate(
+                """
+                () => {
+                  const norm = (value) => (value || '').toString().replace(/\\s+/g, ' ').trim();
+                  const visible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                  };
+                  const hrefOf = (el) => {
+                    const raw = el.href || el.getAttribute('href') || el.getAttribute('formaction') || '';
+                    if (!raw) return '';
+                    try { return new URL(raw, location.href).href; } catch { return raw; }
+                  };
+                  const controls = [...document.querySelectorAll('a,button,[role="button"],input[type="button"],input[type="submit"]')]
+                    .filter(visible)
+                    .map((el) => {
+                      const text = norm(el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '');
+                      const href = hrefOf(el);
+                      const haystack = `${text} ${href} ${el.className || ''} ${el.id || ''}`.toLowerCase();
+                      const exact = /^institutional login$/i.test(text);
+                      const institutionLogin = exact || haystack.includes('institutional login');
+                      if (!institutionLogin) return null;
+                      if (haystack.includes('personal') || haystack.includes('account') || haystack.includes('register') || haystack.includes('login / register')) return null;
+                      const rect = el.getBoundingClientRect();
+                      return {el, text, href, rect, score: (exact ? 100 : 20) - Math.max(0, rect.top / 1000)};
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => b.score - a.score);
+                  const target = controls[0];
+                  if (!target) return null;
+                  target.el.scrollIntoView({block: 'center', inline: 'center'});
+                  target.el.click();
+                  return {
+                    selector: 'wiley-institutional-login',
+                    text: target.text.slice(0, 200),
+                    href: target.href.slice(0, 500),
+                    score: Math.round(target.score)
+                  };
+                }
+                """
+            )
+            if isinstance(detail, dict) and detail.get("text"):
+                if result is not None:
+                    self._event(result, "sso_entry_clicked", json.dumps(detail, ensure_ascii=False))
+                return True
+        except Exception as exc:
+            if result is not None:
+                self._event(result, "sso_entry_error", f"{type(exc).__name__}: {exc}")
         return False
 
     def _click_elsevier_institution_entry(self, page: Any, result: DownloadResult | None = None) -> bool:
@@ -832,14 +884,19 @@ class PublisherBatchDownloader:
                       const href = hrefOf(el);
                       const haystack = `${text} ${href}`.toLowerCase();
                       let score = 0;
+                      let matched = false;
                       if (href.toLowerCase().includes('auth.elsevier.com/shibauth/institutionlogin')) score += 100;
-                      if (haystack.includes('access through tsinghua university')) score += 80;
-                      if (haystack.includes('access through your organization')) score += 40;
+                      if (href.toLowerCase().includes('auth.elsevier.com/shibauth/institutionlogin')) matched = true;
+                      if (haystack.includes('access through tsinghua university')) { score += 80; matched = true; }
+                      if (haystack.includes('access through your organization')) { score += 40; matched = true; }
                       if (haystack.includes('access through another organization')) score -= 60;
                       if (haystack.includes('purchase pdf')) score -= 80;
+                      if (haystack.includes('go to elsevier homepage') || href.toLowerCase().replace(/\\/$/, '') === 'http://www.elsevier.com') return null;
+                      if (!matched) return null;
                       if (el.tagName === 'A') score += 10;
                       return {el, text, href, score};
                     })
+                    .filter(Boolean)
                     .filter((item) => item.score > 0)
                     .sort((a, b) => b.score - a.score);
                   const target = controls[0];
@@ -1105,9 +1162,15 @@ class PublisherBatchDownloader:
         host = (urlparse(current_url).netloc or "").lower()
         if host.endswith("tsinghua.edu.cn"):
             return False
+        if self._select_wiley_tsinghua_openathens_wayfless(page, result):
+            return True
+        if self._select_recent_institution(page, result):
+            return True
         if not self.institution_query:
             self._event(result, "institution_required", "No subscription institution was configured for publisher login.")
             return False
+        if self._select_elsevier_tsinghua_shibauth_wayfless(page, result):
+            return True
         if self._select_openathens_wayfinder(page, result):
             return True
         if self._select_annual_reviews_openathens(page, result):
@@ -1135,6 +1198,226 @@ class PublisherBatchDownloader:
                         continue
             except Exception:
                 continue
+        return False
+
+    def _select_wiley_tsinghua_openathens_wayfless(self, page: Any, result: DownloadResult) -> bool:
+        if self.profile.name.lower() != "wiley":
+            return False
+        institution = (self.institution_query or "").lower()
+        if "清华" not in institution and "tsinghua" not in institution:
+            return False
+        current_url = str(getattr(page, "url", "") or "")
+        parsed = urlparse(current_url)
+        host = (parsed.netloc or "").lower()
+        if host and not host.endswith("onlinelibrary.wiley.com"):
+            return False
+        redirect_values = parse_qs(parsed.query).get("redirectUri") or parse_qs(parsed.query).get("redirecturi")
+        redirect_uri = redirect_values[0] if redirect_values else f"/doi/full/{result.doi}?saml_referrer"
+        wayfless_url = "https://onlinelibrary.wiley.com/action/ssostart?" + urlencode(
+            {
+                "idp": "https://idp.tsinghua.edu.cn/openathens",
+                "redirectUri": redirect_uri,
+            }
+        )
+        try:
+            page.goto(wayfless_url, wait_until="domcontentloaded", timeout=30_000)
+            self._event(
+                result,
+                "institution_selected",
+                json.dumps(
+                    {
+                        "selector": "wiley-tsinghua-openathens-wayfless",
+                        "text": "Tsinghua University (OpenAthens)",
+                        "href": wayfless_url,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            return True
+        except Exception as exc:
+            self._event(result, "institution_select_error", f"{type(exc).__name__}: {exc}")
+            return False
+
+    def _select_elsevier_tsinghua_shibauth_wayfless(self, page: Any, result: DownloadResult) -> bool:
+        if self.profile.name.lower() != "elsevier" or not self._institution_query_is_tsinghua():
+            return False
+        current_url = str(getattr(page, "url", "") or "")
+        host = (urlparse(current_url).netloc or "").lower()
+        if not (
+            host.endswith("id.elsevier.com")
+            or host.endswith("auth.elsevier.com")
+            or host.endswith("sciencedirect.com")
+            or host.endswith("linkinghub.elsevier.com")
+        ):
+            return False
+        return_url = self._elsevier_auth_return_url(current_url)
+        wayfless_url = "https://auth.elsevier.com/ShibAuth/institutionLogin?" + urlencode(
+            {
+                "entityID": "https://idp.tsinghua.edu.cn/idp/shibboleth",
+                "appReturnURL": return_url,
+            }
+        )
+        try:
+            page.goto(wayfless_url, wait_until="domcontentloaded", timeout=30_000)
+            self._event(
+                result,
+                "institution_selected",
+                json.dumps(
+                    {
+                        "selector": "elsevier-tsinghua-shibauth-wayfless",
+                        "text": "Tsinghua University",
+                        "href": wayfless_url,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            return True
+        except Exception as exc:
+            self._event(result, "institution_select_error", f"{type(exc).__name__}: {exc}")
+            return False
+
+    def _elsevier_auth_return_url(self, current_url: str) -> str:
+        parsed = urlparse(current_url)
+        query = parse_qs(parsed.query)
+        for key in ("targetUrl", "targetURL", "returnUrl"):
+            value = query.get(key, [""])[0]
+            if value:
+                return value
+        state = query.get("state", [""])[0]
+        if state:
+            state_query = parse_qs(state)
+            value = state_query.get("returnUrl", [""])[0]
+            if value:
+                return value
+        pii = self._extract_elsevier_pii(current_url)
+        if pii:
+            return f"https://www.sciencedirect.com/science/article/pii/{pii}"
+        return current_url if current_url.startswith("http") else "https://www.sciencedirect.com/"
+
+    def _select_recent_institution(self, page: Any, result: DownloadResult) -> bool:
+        try:
+            detail = page.evaluate(
+                """
+                (options) => {
+                  const norm = (value) => (value || '').toString().replace(/\\s+/g, ' ').trim();
+                  const visible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                  };
+                  const textOf = (el) => norm([
+                    el.innerText || '',
+                    el.textContent || '',
+                    el.value || '',
+                    el.getAttribute('aria-label') || '',
+                    el.getAttribute('title') || ''
+                  ].join(' '));
+                  const exactBad = [
+                    'recent institutions',
+                    'search for your institution',
+                    'search your institution',
+                    'institutional login',
+                    'login',
+                    'log in',
+                    'edit',
+                    'change',
+                    'remove',
+                    'continue'
+                  ];
+                  const containsBad = [
+                    'openathens account',
+                    'sign in with your openathens account',
+                    'register',
+                    'create account',
+                    'personal account',
+                    'username',
+                    'password',
+                    'email'
+                  ];
+                  const institutionQuery = norm(options && options.institutionQuery).toLowerCase();
+                  const queryTokens = institutionQuery
+                    .split(/[\\s,;，；()（）]+/)
+                    .map((token) => token.trim())
+                    .filter((token) => token.length >= 3);
+                  const isTsinghuaQuery = institutionQuery.includes('清华') || institutionQuery.includes('tsinghua');
+                  const queryMatches = (lower) => {
+                    if (!institutionQuery) return true;
+                    if (queryTokens.some((token) => lower.includes(token))) return true;
+                    return isTsinghuaQuery && (lower.includes('tsinghua') || lower.includes('清华'));
+                  };
+                  const clickableSelector = 'a,button,[role="button"],[role="option"],input[type="button"],input[type="submit"]';
+                  const clickTargetFor = (control, cardText, cardLower) => {
+                    if (control.matches(clickableSelector)) return {el: control, text: cardText, penalty: 0};
+                    const children = [...control.querySelectorAll(clickableSelector)]
+                      .filter(visible)
+                      .map((child) => {
+                        const childText = textOf(child);
+                        const lower = (childText || cardText).toLowerCase();
+                        const ownLower = childText.toLowerCase();
+                        if (exactBad.some((marker) => ownLower === marker)) return null;
+                        if (containsBad.some((marker) => ownLower.includes(marker))) return null;
+                        if (!queryMatches(lower)) return null;
+                        const href = ((child.href || child.getAttribute('href') || child.getAttribute('formaction') || '') + '').toLowerCase();
+                        let score = 0;
+                        if (childText) score += 10;
+                        if (href) score += 15;
+                        if (lower.includes('tsinghua') || lower.includes('清华')) score += 100;
+                        if (lower.includes('university')) score += 70;
+                        if (lower.includes('openathens') || lower.includes('shibboleth') || lower.includes('carsi')) score += 30;
+                        return {el: child, text: childText || cardText, score};
+                      })
+                      .filter(Boolean)
+                      .sort((a, b) => b.score - a.score);
+                    if (children[0]) return {el: children[0].el, text: children[0].text, penalty: 0};
+                    return {el: control, text: cardText, penalty: 30};
+                  };
+                  const sections = [...document.querySelectorAll('section,div,ul,ol')]
+                    .filter(visible)
+                    .filter((el) => textOf(el).toLowerCase().includes('recent institution'))
+                    .sort((a, b) => {
+                      const ar = a.getBoundingClientRect();
+                      const br = b.getBoundingClientRect();
+                      return (ar.width * ar.height) - (br.width * br.height);
+                    });
+                  for (const section of sections) {
+                    const controls = [...section.querySelectorAll('a,button,[role="button"],[role="option"],li,article')]
+                      .filter(visible)
+                      .map((control) => {
+                      const text = textOf(control);
+                      const lower = text.toLowerCase();
+                        if (text.length < 3 || text.length > 260) return null;
+                        if (exactBad.some((marker) => lower === marker)) return null;
+                        if (containsBad.some((marker) => lower.includes(marker))) return null;
+                        if (!queryMatches(lower)) return null;
+                        const rect = control.getBoundingClientRect();
+                        let score = 1;
+                        if (lower.includes('tsinghua') || lower.includes('清华')) score += 100;
+                        if (lower.includes('university')) score += 70;
+                        if (lower.includes('institute') || lower.includes('college') || lower.includes('academy')) score += 40;
+                        if (lower.includes('openathens') || lower.includes('shibboleth') || lower.includes('carsi')) score += 30;
+                        if (lower.includes('edit') || lower.includes('change') || lower.includes('remove')) score -= 25;
+                        const clickTarget = clickTargetFor(control, text, lower);
+                        return {control: clickTarget.el, text: clickTarget.text, rect, score: score - clickTarget.penalty};
+                      })
+                      .filter(Boolean)
+                      .sort((a, b) => b.score - a.score || a.rect.top - b.rect.top);
+                    const target = controls[0];
+                    if (!target) continue;
+                    target.control.scrollIntoView({block: 'center', inline: 'center'});
+                    target.control.click();
+                    return {selector: 'recent-institution', text: target.text.slice(0, 200), score: Math.round(target.score)};
+                  }
+                  return null;
+                }
+                """,
+                {"institutionQuery": self.institution_query},
+            )
+            if isinstance(detail, dict) and detail.get("text"):
+                self._event(result, "institution_selected", json.dumps(detail, ensure_ascii=False))
+                self._click_optional_continue(page, result)
+                return True
+        except Exception as exc:
+            self._event(result, "recent_institution_error", f"{type(exc).__name__}: {exc}")
         return False
 
     def _select_ieee_institution(self, page: Any, result: DownloadResult) -> bool:
@@ -1438,6 +1721,8 @@ class PublisherBatchDownloader:
                 content_type = (response.headers.get("content-type") or "").lower()
                 if self._is_supplementary_url(url):
                     return
+                if not self._is_record_pdf_url(url, doi):
+                    return
                 if "pdf" not in content_type and not self._is_pdf_candidate_url(url):
                     return
                 if self._should_defer_response_body(url):
@@ -1453,10 +1738,17 @@ class PublisherBatchDownloader:
         page.on("response", on_response)
         try:
             self._return_to_record_article_if_needed(page, result, doi)
+            if self.profile.name.lower() == "wiley" and self._click_wiley_read_full_text_entry(page, result):
+                time.sleep(3)
+                self._wait_for_challenge(page, result)
+                self._dismiss_cookie_banners(page, result)
+                if self._looks_logged_out(page) or self._wiley_institution_login_visible(page):
+                    self._complete_login_from_current_page(page, result)
+                    self._return_to_record_article_if_needed(page, result, doi)
             if self._click_pdf_entry(page, result, doi=doi):
                 time.sleep(5)
                 if not captured["bytes"]:
-                    body, final_url = self._fetch_page_state_pdf(page)
+                    body, final_url = self._fetch_page_state_pdf(page, doi=doi)
                     if body:
                         captured["bytes"] = body
                         captured["url"] = final_url
@@ -1483,7 +1775,7 @@ class PublisherBatchDownloader:
                                 captured["bytes"] = body
                                 captured["url"] = response.url
                     if not captured["bytes"]:
-                        body, final_url = self._fetch_page_state_pdf(page, response, [str(captured["deferred_url"])])
+                        body, final_url = self._fetch_page_state_pdf(page, response, [str(captured["deferred_url"])], doi=doi)
                         if body:
                             captured["bytes"] = body
                             captured["url"] = final_url
@@ -1497,7 +1789,7 @@ class PublisherBatchDownloader:
                 self._wait_for_challenge(page, result)
                 time.sleep(3)
                 if not captured["bytes"]:
-                    body, final_url = self._fetch_page_state_pdf(page, extra_urls=[str(captured["deferred_url"])])
+                    body, final_url = self._fetch_page_state_pdf(page, extra_urls=[str(captured["deferred_url"])], doi=doi)
                     if body:
                         captured["bytes"] = body
                         captured["url"] = final_url
@@ -1509,12 +1801,156 @@ class PublisherBatchDownloader:
                 pass
         return captured["bytes"], str(captured["url"])
 
+    def _click_wiley_read_full_text_entry(self, page: Any, result: DownloadResult) -> bool:
+        """Use Wiley's full-text access path before trying PDF/ePDF links."""
+        try:
+            detail = page.evaluate(
+                """
+                () => {
+                  const norm = (value) => (value || '').toString().replace(/\\s+/g, ' ').trim();
+                  const visible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                  };
+                  const hrefOf = (el) => {
+                    const raw = el.href || el.getAttribute('href') || el.getAttribute('formaction') || '';
+                    if (!raw) return '';
+                    try { return new URL(raw, location.href).href; } catch { return raw; }
+                  };
+                  const controls = [...document.querySelectorAll('a,button,[role="button"],input[type="button"],input[type="submit"]')]
+                    .filter(visible)
+                    .map((el) => {
+                      const text = norm(el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '');
+                      const href = hrefOf(el);
+                      const haystack = `${text} ${href} ${el.className || ''} ${el.id || ''}`.toLowerCase();
+                      const readFullText = /\\bread the full text\\b/i.test(text) || href.toLowerCase().includes('/doi/full/');
+                      if (!readFullText) return null;
+                      if (haystack.includes('pdf') || haystack.includes('account') || haystack.includes('register')) return null;
+                      const rect = el.getBoundingClientRect();
+                      const exactScore = /^read the full text$/i.test(text) ? 100 : 0;
+                      const hrefScore = href.toLowerCase().includes('/doi/full/') ? 30 : 0;
+                      return {el, text, href, rect, score: exactScore + hrefScore - Math.max(0, rect.top / 1000)};
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => b.score - a.score);
+                  const target = controls[0];
+                  if (!target) return null;
+                  target.el.scrollIntoView({block: 'center', inline: 'center'});
+                  target.el.click();
+                  return {
+                    selector: 'wiley-read-full-text',
+                    text: target.text.slice(0, 200),
+                    href: target.href.slice(0, 500),
+                    score: Math.round(target.score)
+                  };
+                }
+                """
+            )
+            if isinstance(detail, dict) and detail.get("text"):
+                self._event(result, "wiley_read_full_text_clicked", json.dumps(detail, ensure_ascii=False))
+                return True
+        except Exception as exc:
+            self._event(result, "wiley_read_full_text_error", f"{type(exc).__name__}: {exc}")
+        return False
+
+    def _wiley_institution_login_visible(self, page: Any) -> bool:
+        if self.profile.name.lower() != "wiley":
+            return False
+        haystack = f"{self._title(page)} {self._body_text(page, 2_000)}".lower()
+        return any(
+            marker in haystack
+            for marker in (
+                "institutional login",
+                "search for your institution",
+                "recent institutions",
+                "log in through your institution",
+                "access through your institution",
+            )
+        )
+
+    def _click_wiley_pdf_entry(self, page: Any, result: DownloadResult, doi: str) -> bool:
+        if self.profile.name.lower() != "wiley":
+            return False
+        try:
+            detail = page.evaluate(
+                """
+                (options) => {
+                  const doi = (options && options.doi || '').toLowerCase();
+                  const encodedDoi = encodeURIComponent(doi);
+                  const norm = (value) => (value || '').toString().replace(/\\s+/g, ' ').trim();
+                  const visible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                  };
+                  const hrefOf = (el) => {
+                    const raw = el.href || el.getAttribute('href') || el.getAttribute('formaction') || '';
+                    if (!raw) return '';
+                    try { return new URL(raw, location.href).href; } catch { return raw; }
+                  };
+                  const controls = [...document.querySelectorAll('a,button,[role="button"],input[type="button"],input[type="submit"]')]
+                    .filter(visible)
+                    .map((el) => {
+                      const rect = el.getBoundingClientRect();
+                      const text = norm(el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '');
+                      const href = hrefOf(el);
+                      const lowerText = text.toLowerCase();
+                      const lowerHref = href.toLowerCase();
+                      const haystack = `${lowerText} ${lowerHref} ${el.className || ''} ${el.id || ''}`.toLowerCase();
+                      if (haystack.includes('reference') || haystack.includes('citation') || haystack.includes('supporting information')) return null;
+                      if (haystack.includes('download references')) return null;
+                      const recordHref = doi && (lowerHref.includes(doi) || lowerHref.includes(encodedDoi));
+                      const pdfHref = lowerHref.includes('/doi/pdfdirect/')
+                        || lowerHref.includes('/doi/pdf/')
+                        || lowerHref.includes('/doi/epdf/');
+                      const pdfText = /^pdf$/i.test(text) || /^download pdf$/i.test(text) || /\\bdownload pdf\\b/i.test(text);
+                      if (href && pdfHref && !recordHref) return null;
+                      if (!pdfHref && !pdfText) return null;
+                      const rightRailPenalty = rect.left > Math.max(900, window.innerWidth * 0.70) ? 120 : 0;
+                      let score = 1;
+                      if (recordHref) score += 120;
+                      if (lowerHref.includes('/doi/pdfdirect/')) score += 50;
+                      if (lowerHref.includes('/doi/pdf/')) score += 40;
+                      if (lowerHref.includes('/doi/epdf/')) score += 30;
+                      if (/^pdf$/i.test(text)) score += 30;
+                      if (/^download pdf$/i.test(text)) score += 35;
+                      if (rect.top < window.innerHeight * 0.65) score += 10;
+                      return {el, text, href, rect, score: score - rightRailPenalty};
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => b.score - a.score || a.rect.top - b.rect.top);
+                  const target = controls[0];
+                  if (!target || target.score <= 0) return null;
+                  target.el.scrollIntoView({block: 'center', inline: 'center'});
+                  target.el.removeAttribute('target');
+                  target.el.click();
+                  return {
+                    selector: 'wiley-pdf-entry',
+                    text: target.text.slice(0, 200),
+                    href: target.href.slice(0, 500),
+                    score: Math.round(target.score)
+                  };
+                }
+                """,
+                {"doi": doi},
+            )
+            if isinstance(detail, dict) and (detail.get("text") or detail.get("href")):
+                self._event(result, "pdf_button_clicked", json.dumps(detail, ensure_ascii=False))
+                return True
+        except Exception as exc:
+            self._event(result, "pdf_button_error", f"{type(exc).__name__}: {exc}")
+        return False
+
     def _click_pdf_entry(self, page: Any, result: DownloadResult, *, doi: str = "") -> bool:
         if self.profile.name.lower() == "elsevier":
             if self._click_elsevier_view_pdf_entry(page, result):
                 return True
         if doi and self.profile.name.lower() == "aps":
             if self._click_current_doi_pdf_entry(page, result, doi):
+                return True
+        if doi and self.profile.name.lower() == "wiley":
+            if self._click_wiley_pdf_entry(page, result, doi):
                 return True
 
         selectors = (
@@ -1718,9 +2154,12 @@ class PublisherBatchDownloader:
         page: Any,
         response: Any | None = None,
         extra_urls: list[str] | None = None,
+        doi: str = "",
     ) -> tuple[bytes | None, str]:
         for fallback_url in self._page_state_pdf_urls(page, response, extra_urls):
             if not self._is_pdf_candidate_url(fallback_url) or self._is_supplementary_url(fallback_url):
+                continue
+            if not self._is_record_pdf_url(fallback_url, doi):
                 continue
             body, final_url = self._fetch_pdf_url_with_browser_state(fallback_url, page)
             if body:
@@ -1769,6 +2208,99 @@ class PublisherBatchDownloader:
             self._event(result, "download_capture_error", f"{type(exc).__name__}: {exc}")
         return None, pdf_url
 
+    def _capture_pdf_viewer_download(self, page: Any, result: DownloadResult) -> tuple[bytes | None, str]:
+        expect_download = getattr(page, "expect_download", None)
+        if expect_download is None:
+            return None, ""
+
+        script = """
+            (options) => {
+              const click = !!(options && options.click);
+              const norm = (value) => (value || '').toString().replace(/\\s+/g, ' ').trim();
+              const visible = (el) => {
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+              };
+              const controls = [];
+              const visit = (root) => {
+                if (!root) return;
+                for (const el of root.querySelectorAll('*')) {
+                  if (el.shadowRoot) visit(el.shadowRoot);
+                  const text = norm([
+                    el.innerText || '',
+                    el.textContent || '',
+                    el.value || '',
+                    el.getAttribute('aria-label') || '',
+                    el.getAttribute('title') || '',
+                    el.id || '',
+                    el.className || ''
+                  ].join(' '));
+                  const lower = text.toLowerCase();
+                  const isControl = ['BUTTON', 'A'].includes(el.tagName) || el.getAttribute('role') === 'button';
+                  if (!isControl || !visible(el)) continue;
+                  if (!lower.includes('download') && !lower.includes('下载')) continue;
+                  if (lower.includes('print') || lower.includes('打印')) continue;
+                  const rect = el.getBoundingClientRect();
+                  controls.push({el, text, rect, score: (el.id || '').toLowerCase().includes('download') ? 100 : 10});
+                }
+              };
+              visit(document);
+              controls.sort((a, b) => b.score - a.score || a.rect.top - b.rect.top);
+              const target = controls[0];
+              if (!target) return null;
+              if (click) target.el.click();
+              return {selector: 'pdf-viewer-download', text: target.text.slice(0, 200), score: Math.round(target.score)};
+            }
+        """
+        try:
+            detail = page.evaluate(script, {"click": False})
+            if not isinstance(detail, dict) or not detail.get("selector"):
+                return self._capture_pdf_viewer_toolbar_download(page, result)
+            try:
+                with expect_download(timeout=self.pdf_timeout_ms) as download_info:
+                    page.evaluate(script, {"click": True})
+                download = download_info.value
+                path = download.path()
+                body = Path(path).read_bytes()
+                if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
+                    self._event(result, "pdf_viewer_download_captured", json.dumps(detail, ensure_ascii=False))
+                    return body, str(getattr(download, "url", "") or getattr(page, "url", "") or "")
+            except Exception as exc:
+                self._event(result, "pdf_viewer_download_error", f"{type(exc).__name__}: {exc}")
+        except Exception as exc:
+            self._event(result, "pdf_viewer_download_error", f"{type(exc).__name__}: {exc}")
+        return self._capture_pdf_viewer_toolbar_download(page, result)
+
+    def _capture_pdf_viewer_toolbar_download(self, page: Any, result: DownloadResult) -> tuple[bytes | None, str]:
+        expect_download = getattr(page, "expect_download", None)
+        mouse = getattr(page, "mouse", None)
+        if expect_download is None or mouse is None or not hasattr(mouse, "click"):
+            return None, ""
+        try:
+            size = page.evaluate("() => ({width: window.innerWidth, height: window.innerHeight})")
+        except Exception:
+            size = {}
+        try:
+            width = int((size or {}).get("width") or 1920)
+        except Exception:
+            width = 1920
+        x = max(40, width - 102)
+        y = 28
+        try:
+            with expect_download(timeout=self.pdf_timeout_ms) as download_info:
+                mouse.click(x, y)
+            download = download_info.value
+            path = download.path()
+            body = Path(path).read_bytes()
+            if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
+                detail = {"selector": "pdf-viewer-toolbar-download", "x": x, "y": y}
+                self._event(result, "pdf_viewer_toolbar_download_captured", json.dumps(detail, ensure_ascii=False))
+                return body, str(getattr(download, "url", "") or getattr(page, "url", "") or "")
+        except Exception as exc:
+            self._event(result, "pdf_viewer_toolbar_download_error", f"{type(exc).__name__}: {exc}")
+        return None, ""
+
     def _capture_pdf_via_async_navigation(
         self,
         page: Any,
@@ -1785,11 +2317,13 @@ class PublisherBatchDownloader:
         timeout_sec = max(10, int(self.pdf_timeout_ms / 1000))
         deadline = time.time() + timeout_sec
         attempted: set[str] = set()
+        viewer_download_attempted = False
         while time.time() < deadline:
             if self._is_challenge_page(page):
                 if not self._wait_for_challenge_with_deadline(page, result, deadline):
                     return None, str(getattr(page, "url", "") or "")
                 attempted.clear()
+                viewer_download_attempted = False
                 continue
             for candidate_url in self._page_state_pdf_urls(page):
                 if candidate_url in attempted:
@@ -1799,6 +2333,11 @@ class PublisherBatchDownloader:
                     continue
                 self._event(result, "pdf_state_candidate", candidate_url)
                 body, final_url = self._fetch_pdf_url_with_browser_state(candidate_url, page)
+                if body:
+                    return body, final_url
+            if not viewer_download_attempted and self._page_state_pdf_urls(page):
+                viewer_download_attempted = True
+                body, final_url = self._capture_pdf_viewer_download(page, result)
                 if body:
                     return body, final_url
             time.sleep(2)
@@ -1956,6 +2495,16 @@ class PublisherBatchDownloader:
 
     def _is_supplementary_url(self, url: str) -> bool:
         return is_supplementary_url(self.profile, url)
+
+    def _is_record_pdf_url(self, url: str, doi: str) -> bool:
+        if not doi or self.profile.name.lower() != "wiley":
+            return True
+        if self._url_matches_record(url, doi):
+            return True
+        host = (urlparse(str(url or "")).netloc or "").lower()
+        if self.profile.base_domains and not any(host == domain or host.endswith(f".{domain}") for domain in self.profile.base_domains):
+            return False
+        return False
 
     def _return_to_record_article_if_needed(self, page: Any, result: DownloadResult, doi: str) -> bool:
         if self.profile.name.lower() != "aps":

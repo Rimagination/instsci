@@ -567,6 +567,214 @@ class ACSBatchTests(unittest.TestCase):
         self.assertNotIn("input", profile.institution_input_selectors)
         self.assertTrue(any("Tsinghua University" in selector for selector in profile.institution_result_selectors))
 
+    def test_wiley_clicks_read_full_text_entry(self):
+        class FakePage:
+            def evaluate(self, _script):
+                return {
+                    "selector": "wiley-read-full-text",
+                    "text": "Read the full text",
+                    "href": "https://onlinelibrary.wiley.com/doi/full/10.1002/ldr.5372",
+                }
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=get_publisher_profile("wiley"))
+        result = DownloadResult(doi="10.1002/ldr.5372", status="failed")
+
+        self.assertTrue(downloader._click_wiley_read_full_text_entry(FakePage(), result))
+        self.assertEqual(result.events[-1]["state"], "wiley_read_full_text_clicked")
+        self.assertIn("Read the full text", result.events[-1]["detail"])
+
+    def test_wiley_clicks_institutional_login_entry(self):
+        class FakePage:
+            def evaluate(self, _script):
+                return {
+                    "selector": "wiley-institutional-login",
+                    "text": "Institutional Login",
+                    "href": "",
+                }
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=get_publisher_profile("wiley"))
+        result = DownloadResult(doi="10.1002/ldr.5372", status="failed")
+
+        self.assertTrue(downloader._click_wiley_institution_login_entry(FakePage(), result))
+        self.assertEqual(result.events[-1]["state"], "sso_entry_clicked")
+        self.assertIn("Institutional Login", result.events[-1]["detail"])
+
+    def test_wiley_rejects_institution_help_pdf_for_record(self):
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=get_publisher_profile("wiley"))
+
+        self.assertFalse(
+            downloader._is_record_pdf_url(
+                "https://id.tsinghua.edu.cn/res/pdf/SMRZ_guide_cn.pdf",
+                "10.1002/ldr.5372",
+            )
+        )
+        self.assertTrue(
+            downloader._is_record_pdf_url(
+                "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/ldr.5372",
+                "10.1002/ldr.5372",
+            )
+        )
+
+    def test_select_institution_uses_recent_institution_without_query(self):
+        class FakeLocator:
+            first = None
+
+            def __init__(self):
+                self.first = self
+
+            def is_visible(self, **_kwargs):
+                return False
+
+        class FakePage:
+            url = "https://onlinelibrary.wiley.com/action/ssostart"
+
+            def locator(self, _selector):
+                return FakeLocator()
+
+            def evaluate(self, _script, _options=None):
+                return {
+                    "selector": "recent-institution",
+                    "text": "Example University",
+                }
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=get_publisher_profile("wiley"))
+        result = DownloadResult(doi="10.1002/ldr.5372", status="failed")
+
+        self.assertTrue(downloader._select_institution(FakePage(), result))
+        self.assertEqual(result.events[-1]["state"], "institution_selected")
+        self.assertIn("Example University", result.events[-1]["detail"])
+
+    def test_select_recent_institution_prefers_matching_openathens_card(self):
+        class FakePage:
+            url = "https://onlinelibrary.wiley.com/action/ssostart"
+
+            def __init__(self):
+                self.options = None
+
+            def evaluate(self, script, options=None):
+                self.options = options
+                if options != {"institutionQuery": "清华大学"}:
+                    return None
+                if "queryMatches" not in script or "score += 100" not in script or "clickTargetFor" not in script:
+                    return None
+                return {
+                    "selector": "recent-institution",
+                    "text": "Tsinghua University (OpenAthens)",
+                    "score": 200,
+                }
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        page = FakePage()
+        downloader = PublisherBatchDownloader(
+            cfg,
+            profile=get_publisher_profile("wiley"),
+            institution_query="清华大学",
+        )
+        result = DownloadResult(doi="10.1002/ldr.5372", status="failed")
+
+        self.assertTrue(downloader._select_recent_institution(page, result))
+        self.assertEqual(page.options, {"institutionQuery": "清华大学"})
+        self.assertEqual(result.events[-1]["state"], "institution_selected")
+        self.assertIn("Tsinghua University (OpenAthens)", result.events[-1]["detail"])
+
+    def test_wiley_tsinghua_wayfless_uses_redirect_from_ssostart(self):
+        class FakePage:
+            url = "https://onlinelibrary.wiley.com/action/ssostart?redirectUri=%2Fdoi%2Ffull%2F10.1002%2Fldr.4101%3Fsaml_referrer"
+
+            def __init__(self):
+                self.goto_url = ""
+
+            def goto(self, url, **_kwargs):
+                self.goto_url = url
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        page = FakePage()
+        downloader = PublisherBatchDownloader(
+            cfg,
+            profile=get_publisher_profile("wiley"),
+            institution_query="清华大学",
+        )
+        result = DownloadResult(doi="10.1002/ldr.4101", status="failed")
+
+        self.assertTrue(downloader._select_wiley_tsinghua_openathens_wayfless(page, result))
+        self.assertIn("idp=https%3A%2F%2Fidp.tsinghua.edu.cn%2Fopenathens", page.goto_url)
+        self.assertIn("redirectUri=%2Fdoi%2Ffull%2F10.1002%2Fldr.4101%3Fsaml_referrer", page.goto_url)
+        self.assertIn("wiley-tsinghua-openathens-wayfless", result.events[-1]["detail"])
+
+    def test_wiley_clicks_current_record_pdf_entry(self):
+        class FakePage:
+            def __init__(self):
+                self.options = None
+
+            def evaluate(self, script, options=None):
+                self.options = options
+                if options != {"doi": "10.1002/ldr.4101"}:
+                    return None
+                if "wiley-pdf-entry" not in script or "/doi/pdfdirect/" not in script:
+                    return None
+                return {
+                    "selector": "wiley-pdf-entry",
+                    "text": "PDF",
+                    "href": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/ldr.4101",
+                    "score": 200,
+                }
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        page = FakePage()
+        downloader = PublisherBatchDownloader(cfg, profile=get_publisher_profile("wiley"))
+        result = DownloadResult(doi="10.1002/ldr.4101", status="failed")
+
+        self.assertTrue(downloader._click_pdf_entry(page, result, doi=result.doi))
+        self.assertEqual(page.options, {"doi": "10.1002/ldr.4101"})
+        self.assertEqual(result.events[-1]["state"], "pdf_button_clicked")
+        self.assertIn("wiley-pdf-entry", result.events[-1]["detail"])
+
     def test_ieee_institution_selection_uses_typeahead_result(self):
         class FakeLocator:
             def __init__(self, page, selector):
@@ -801,6 +1009,75 @@ class ACSBatchTests(unittest.TestCase):
         self.assertTrue(downloader._click_sso_entry(page, result))
         self.assertTrue(page.clicked)
         self.assertIn("auth.elsevier.com/ShibAuth/institutionLogin", result.events[-1]["detail"])
+
+    def test_elsevier_does_not_click_homepage_as_institution_entry(self):
+        class FakeLocator:
+            first = None
+
+            def __init__(self):
+                self.first = self
+
+            def is_visible(self, **_kwargs):
+                return False
+
+        class FakePage:
+            def evaluate(self, script):
+                if "go to elsevier homepage" in script and "!matched" in script and ".filter(Boolean)" in script:
+                    return None
+                return {
+                    "selector": "elsevier-institution-access",
+                    "text": "Go to Elsevier Homepage",
+                    "href": "http://www.elsevier.com/",
+                    "score": 10,
+                }
+
+            def locator(self, _selector):
+                return FakeLocator()
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        result = DownloadResult(doi="10.1016/example", status="failed")
+        downloader = PublisherBatchDownloader(cfg, profile=ELSEVIER_PROFILE)
+
+        self.assertFalse(downloader._click_sso_entry(FakePage(), result))
+
+    def test_elsevier_tsinghua_wayfless_uses_oauth_return_url(self):
+        class FakePage:
+            url = (
+                "https://id.elsevier.com/as/authorization.oauth2?"
+                "state=retryCounter%3D0%26returnUrl%3Dhttps%253A%252F%252Fwww.sciencedirect.com%252Fscience%252Farticle%252Fpii%252FS0929139326003835"
+            )
+
+            def __init__(self):
+                self.goto_url = ""
+
+            def goto(self, url, **_kwargs):
+                self.goto_url = url
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        page = FakePage()
+        result = DownloadResult(doi="10.1016/j.apsoil.2026.107163", status="failed")
+        downloader = PublisherBatchDownloader(
+            cfg,
+            profile=ELSEVIER_PROFILE,
+            institution_query="Tsinghua University",
+        )
+
+        self.assertTrue(downloader._select_elsevier_tsinghua_shibauth_wayfless(page, result))
+        self.assertIn("entityID=https%3A%2F%2Fidp.tsinghua.edu.cn%2Fidp%2Fshibboleth", page.goto_url)
+        self.assertIn("appReturnURL=https%3A%2F%2Fwww.sciencedirect.com%2Fscience%2Farticle%2Fpii%2FS0929139326003835", page.goto_url)
+        self.assertIn("elsevier-tsinghua-shibauth-wayfless", result.events[-1]["detail"])
 
     def test_world_scientific_profile_can_drive_institution_search(self):
         self.assertTrue(WORLD_SCIENTIFIC_PROFILE.institution_input_selectors)
@@ -2451,6 +2728,183 @@ class ACSBatchTests(unittest.TestCase):
         self.assertEqual(pdf_bytes, payload)
         self.assertEqual(pdf_url, signed_url)
         self.assertFalse(page.goto_called)
+
+    def test_elsevier_capture_pdf_falls_back_to_pdf_viewer_download(self):
+        with TemporaryDirectory() as tmp:
+            pdfft_url = "https://www.sciencedirect.com/science/article/pii/S0043135424004093/pdfft"
+            signed_url = (
+                "https://pdf.sciencedirectassets.com/271768/1-s2.0-S0043135424X00068/"
+                "1-s2.0-S0043135424004093/main.pdf?X-Amz-Signature=abc"
+            )
+            download_path = Path(tmp) / "viewer.pdf"
+            payload = b"%PDF-" + (b"x" * MIN_PDF_BYTES)
+            download_path.write_bytes(payload)
+
+            class FakeDownload:
+                url = signed_url
+
+                def path(self):
+                    return str(download_path)
+
+            class FakeDownloadContext:
+                value = FakeDownload()
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return False
+
+            class FakePage:
+                url = "https://www.sciencedirect.com/science/article/pii/S0043135424004093"
+
+                def __init__(self):
+                    self.listeners = {}
+                    self.viewer_clicks = 0
+
+                def on(self, event, callback):
+                    self.listeners[event] = callback
+
+                def remove_listener(self, event, _callback):
+                    self.listeners.pop(event, None)
+
+                def evaluate(self, script, arg=None):
+                    if isinstance(arg, dict) and "pdf-viewer-download" in script:
+                        if arg.get("click"):
+                            self.viewer_clicks += 1
+                        return {"selector": "pdf-viewer-download", "text": "Download"}
+                    if isinstance(arg, dict):
+                        return [pdfft_url]
+                    if arg == pdfft_url:
+                        self.url = signed_url
+                        return None
+                    if "elsevier-view-pdf" in script:
+                        return {"selector": "elsevier-view-pdf", "text": "View PDF", "score": 180}
+                    return []
+
+                def expect_download(self, **_kwargs):
+                    return FakeDownloadContext()
+
+                def goto(self, *_args, **_kwargs):
+                    raise AssertionError("Elsevier pdfft should use async navigation")
+
+                def locator(self, _selector):
+                    raise RuntimeError("no body")
+
+                def title(self):
+                    return ""
+
+            cfg = Config(
+                output_dir="out",
+                cache_dir="cache",
+                cookie_path="cookies.json",
+                chrome_profile_dir="profile",
+                carsi_cookie_dir="carsi",
+            )
+            downloader = PublisherBatchDownloader(cfg, profile=ELSEVIER_PROFILE)
+            downloader._fetch_pdf_url = lambda url: (None, url)  # type: ignore[method-assign]
+            page = FakePage()
+            result = DownloadResult(doi="10.1016/j.watres.2024.121507", status="failed")
+
+            with patch("instsci.publisher_batch.time.sleep"):
+                pdf_bytes, pdf_url = downloader._capture_pdf(page, result.doi, result)
+
+            self.assertEqual(pdf_bytes, payload)
+            self.assertEqual(pdf_url, signed_url)
+            self.assertEqual(page.viewer_clicks, 1)
+            self.assertIn("pdf_viewer_download_captured", [event["state"] for event in result.events])
+
+    def test_elsevier_capture_pdf_falls_back_to_pdf_viewer_toolbar_download(self):
+        with TemporaryDirectory() as tmp:
+            pdfft_url = "https://www.sciencedirect.com/science/article/pii/S0043135424004093/pdfft"
+            signed_url = (
+                "https://pdf.sciencedirectassets.com/271768/1-s2.0-S0043135424X00068/"
+                "1-s2.0-S0043135424004093/main.pdf?X-Amz-Signature=abc"
+            )
+            download_path = Path(tmp) / "viewer.pdf"
+            payload = b"%PDF-" + (b"x" * MIN_PDF_BYTES)
+            download_path.write_bytes(payload)
+
+            class FakeDownload:
+                url = signed_url
+
+                def path(self):
+                    return str(download_path)
+
+            class FakeDownloadContext:
+                value = FakeDownload()
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return False
+
+            class FakeMouse:
+                def __init__(self):
+                    self.clicks = []
+
+                def click(self, x, y):
+                    self.clicks.append((x, y))
+
+            class FakePage:
+                url = "https://www.sciencedirect.com/science/article/pii/S0043135424004093"
+
+                def __init__(self):
+                    self.listeners = {}
+                    self.mouse = FakeMouse()
+
+                def on(self, event, callback):
+                    self.listeners[event] = callback
+
+                def remove_listener(self, event, _callback):
+                    self.listeners.pop(event, None)
+
+                def evaluate(self, script, arg=None):
+                    if isinstance(arg, dict) and "pdf-viewer-download" in script:
+                        return None
+                    if script.startswith("() => ({width:"):
+                        return {"width": 1919, "height": 960}
+                    if isinstance(arg, dict):
+                        return [pdfft_url]
+                    if arg == pdfft_url:
+                        self.url = signed_url
+                        return None
+                    if "elsevier-view-pdf" in script:
+                        return {"selector": "elsevier-view-pdf", "text": "View PDF", "score": 180}
+                    return []
+
+                def expect_download(self, **_kwargs):
+                    return FakeDownloadContext()
+
+                def goto(self, *_args, **_kwargs):
+                    raise AssertionError("Elsevier pdfft should use async navigation")
+
+                def locator(self, _selector):
+                    raise RuntimeError("no body")
+
+                def title(self):
+                    return ""
+
+            cfg = Config(
+                output_dir="out",
+                cache_dir="cache",
+                cookie_path="cookies.json",
+                chrome_profile_dir="profile",
+                carsi_cookie_dir="carsi",
+            )
+            downloader = PublisherBatchDownloader(cfg, profile=ELSEVIER_PROFILE)
+            downloader._fetch_pdf_url = lambda url: (None, url)  # type: ignore[method-assign]
+            page = FakePage()
+            result = DownloadResult(doi="10.1016/j.watres.2024.121507", status="failed")
+
+            with patch("instsci.publisher_batch.time.sleep"):
+                pdf_bytes, pdf_url = downloader._capture_pdf(page, result.doi, result)
+
+            self.assertEqual(pdf_bytes, payload)
+            self.assertEqual(pdf_url, signed_url)
+            self.assertEqual(page.mouse.clicks, [(1817, 28)])
+            self.assertIn("pdf_viewer_toolbar_download_captured", [event["state"] for event in result.events])
 
     def test_capture_pdf_defers_sciencedirect_asset_response_body(self):
         pdfft_url = "https://www.sciencedirect.com/science/article/pii/S0043135424004093/pdfft"

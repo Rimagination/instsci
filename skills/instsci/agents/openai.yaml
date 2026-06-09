@@ -1,0 +1,4 @@
+interface:
+  display_name: "InstSci"
+  short_description: "Publisher PDF and InstSci workflows"
+  default_prompt: "Use $instsci to run an InstSci publisher PDF, DOI batch, or closed-access verification workflow."

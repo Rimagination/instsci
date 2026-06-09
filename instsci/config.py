@@ -8,7 +8,6 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_DIR = Path.home() / ".instsci"
-LEGACY_BASE_DIR = Path.home() / ".vpnsci"
 
 
 @dataclass
@@ -22,7 +21,6 @@ class Config:
     email: str = ""  # Set via 'instsci config-cmd --email your@email.com'
     elsevier_api_key: str = ""  # Elsevier Developer Portal API key
     elsevier_inst_token: str = ""  # Optional Elsevier institutional token
-    flaresolverr_url: str = "http://127.0.0.1:8191/v1"  # FlareSolverr service URL
     output_dir: str = ""
     cache_dir: str = ""
     cookie_path: str = ""
@@ -73,9 +71,7 @@ class Config:
     def load(cls, path: Path | None = None) -> "Config":
         """Load config from JSON file, falling back to defaults."""
         if path is None:
-            new_path = DEFAULT_BASE_DIR / "config.json"
-            legacy_path = LEGACY_BASE_DIR / "config.json"
-            path = new_path if new_path.exists() or not legacy_path.exists() else legacy_path
+            path = DEFAULT_BASE_DIR / "config.json"
         if path.exists():
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))

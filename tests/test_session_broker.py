@@ -29,8 +29,17 @@ class SessionBrokerTests(unittest.TestCase):
                 ttl_seconds=86400,
             )
             (Path(tmp) / "queue").mkdir()
+            config = Config(
+                school="Example University",
+                output_dir=str(Path(tmp) / "out"),
+                cache_dir=str(Path(tmp) / "cache"),
+                cookie_path=str(Path(tmp) / "cookies.json"),
+                chrome_profile_dir=str(Path(tmp) / "profile"),
+                carsi_cookie_dir=str(Path(tmp) / "carsi"),
+            )
 
-            with patch("instsci.session_broker.BROKER_ROOT", Path(tmp)), \
+            with patch("instsci.cli.Config.load", return_value=config), \
+                 patch("instsci.session_broker.BROKER_ROOT", Path(tmp)), \
                  patch("instsci.session_broker.pid_is_running", return_value=True), \
                  patch("instsci.session_broker.submit_broker_job") as submit:
                 write_broker_state(state)

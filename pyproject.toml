@@ -24,7 +24,7 @@ instsci = "instsci.cli:app"
 instsci-mcp = "instsci.mcp_server:main"
 
 [tool.setuptools.packages.find]
-include = ["instsci*", "vpnsci*"]
+include = ["instsci*"]
 
 [tool.setuptools.package-data]
 instsci = ["data/*.json"]
