@@ -24,7 +24,7 @@ pip install -e .
 
 当前命令和包名都是 `instsci`。
 
-帮我安装这个 mcp 和 skill：[Rimagination/instsci](https://github.com/Rimagination/instsci)。
+帮我安装这个 mcp 和 skill：https://github.com/Rimagination/instsci
 
 CloakBrowser 浏览器由 InstSci 缓存在项目内的 `instsci/_browsers/cloakbrowser`，该目录不会提交到 Git。
 
@@ -75,7 +75,7 @@ pip install -e .
 
 The command and package name are both `instsci`.
 
-Install this MCP and skill: [Rimagination/instsci](https://github.com/Rimagination/instsci).
+Install this MCP and skill: https://github.com/Rimagination/instsci
 
 InstSci caches the CloakBrowser binary inside `instsci/_browsers/cloakbrowser`; that directory is not committed to Git.
 
