@@ -18,6 +18,7 @@ class Config:
     webvpn_base_url: str = ""  # Legacy storage name for the campus access URL
     ezproxy_base_url: str = ""  # EZproxy URL prefix (e.g. http://eproxy.lib.hku.hk/login?url=)
     proxy_url: str = ""  # Legacy storage name for local SOCKS5 connector URL.
+    browser_proxy_url: str = ""  # CloakBrowser-only static proxy URL for publisher workflows.
     email: str = ""  # Set via 'instsci config-cmd --email your@email.com'
     elsevier_api_key: str = ""  # Elsevier Developer Portal API key
     elsevier_inst_token: str = ""  # Optional Elsevier institutional token

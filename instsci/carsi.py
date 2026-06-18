@@ -158,13 +158,30 @@ class CARSIClient:
         print(f"  4. After login, the tool will automatically capture cookies")
         print("=" * 60 + "\n")
 
-        browser = None
+        context = None
         try:
-            browser = launch(
-                headless=False, humanize=True,
-                args=["--disable-features=CrossOriginOpenerPolicy"],
+            from .browser_identity import browser_launch_args, build_profile_identity, ensure_profile_identity
+
+            prepare_cloakbrowser_runtime()
+            from cloakbrowser import launch_persistent_context
+
+            profile_dir = self.config.chrome_profile_dir
+            Path(profile_dir).mkdir(parents=True, exist_ok=True)
+            ensure_profile_identity(
+                profile_dir,
+                build_profile_identity(
+                    self.config,
+                    publisher=publisher,
+                    institution=self.config.carsi_idp_name or self.config.school,
+                ),
             )
-            context = browser.new_context()
+            context = launch_persistent_context(
+                user_data_dir=profile_dir,
+                headless=False,
+                humanize=True,
+                accept_downloads=True,
+                args=browser_launch_args(self.config),
+            )
             page = context.new_page()
 
             # Navigate to publisher's institutional login page
@@ -260,9 +277,9 @@ class CARSIClient:
             logger.error("CARSI browser login failed: %s", e)
             return False
         finally:
-            if browser:
+            if context:
                 try:
-                    browser.close()
+                    context.close()
                 except Exception:
                     pass
 

@@ -1,4 +1,6 @@
+import json
 import unittest
+from pathlib import Path
 
 from typer.testing import CliRunner
 
@@ -131,6 +133,15 @@ class PublisherAccessCatalogTests(unittest.TestCase):
         self.assertIn("Preferred off-campus access: shibboleth_or_openathens", result.output)
         self.assertIn("WebVPN is optional", result.output)
         self.assertIn("visible_cloakbrowser", result.output)
+
+    def test_legacy_publisher_carsi_config_does_not_default_to_tsinghua(self):
+        config_path = Path(__file__).parents[1] / "instsci" / "data" / "publisher_carsi.json"
+        configs = json.loads(config_path.read_text(encoding="utf-8"))
+
+        for key, entry in configs.items():
+            selector = entry.get("result_selector", "")
+            self.assertNotIn("Tsinghua", selector, key)
+            self.assertNotIn("清华", selector, key)
 
     def test_verify_publisher_access_builds_pdf_candidates_from_catalog(self):
         from instsci.publisher_access import verify_publisher_access

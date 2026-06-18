@@ -33,6 +33,9 @@ class BrokerState:
     started_at: str
     ttl_seconds: int
     heartbeat_at: str = ""
+    browser_proxy_url: str = ""
+    browser_proxy_url_hash: str = ""
+    human_assist_url: str = ""
 
 
 def broker_key(publisher: str) -> str:
@@ -127,6 +130,9 @@ def start_broker_process(
     institution: str,
     ttl_seconds: int,
     cwd: str | Path,
+    human_assist: bool = False,
+    human_assist_host: str = "127.0.0.1",
+    human_assist_port: int = 0,
 ) -> subprocess.Popen[Any]:
     root = broker_dir(publisher)
     root.mkdir(parents=True, exist_ok=True)
@@ -147,6 +153,14 @@ def start_broker_process(
         "--ttl",
         str(ttl_seconds),
     ]
+    if human_assist:
+        args.extend([
+            "--human-assist",
+            "--human-assist-host",
+            human_assist_host,
+            "--human-assist-port",
+            str(human_assist_port),
+        ])
     return subprocess.Popen(
         args,
         cwd=str(cwd),

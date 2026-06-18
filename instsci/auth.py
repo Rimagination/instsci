@@ -66,10 +66,9 @@ class WebVPNAuth:
 
     def _browser_launch_args(self) -> list[str]:
         """Arguments for the WebVPN login browser."""
-        return [
-            "--no-proxy-server",
-            "--disable-features=CrossOriginOpenerPolicy",
-        ]
+        from .browser_identity import browser_launch_args
+
+        return browser_launch_args(self.config, bypass_proxy=True)
 
     @property
     def session(self) -> requests.Session:
@@ -452,11 +451,29 @@ class EZProxyAuth:
             return False
 
         try:
-            self._browser = launch(
-                headless=False, humanize=True,
-                args=["--disable-features=CrossOriginOpenerPolicy"],
+            from .browser_identity import browser_launch_args, build_profile_identity, ensure_profile_identity
+
+            prepare_cloakbrowser_runtime()
+            from cloakbrowser import launch_persistent_context
+
+            profile_dir = self.config.chrome_profile_dir
+            Path(profile_dir).mkdir(parents=True, exist_ok=True)
+            ensure_profile_identity(
+                profile_dir,
+                build_profile_identity(
+                    self.config,
+                    publisher="ezproxy",
+                    institution=self.config.school or self.config.carsi_idp_name,
+                ),
             )
-            self._context = self._browser.new_context()
+            self._context = launch_persistent_context(
+                user_data_dir=profile_dir,
+                headless=False,
+                humanize=True,
+                accept_downloads=True,
+                args=browser_launch_args(self.config),
+            )
+            self._browser = None
             self._page = self._context.new_page()
         except Exception as e:
             logger.error("Failed to start CloakBrowser: %s", e)
@@ -522,14 +539,19 @@ class EZProxyAuth:
         store.apply_to_session(self.session, cookies)
 
     def _close_browser(self):
+        if self._context:
+            try:
+                self._context.close()
+            except Exception:
+                pass
         if self._browser:
             try:
                 self._browser.close()
             except Exception:
                 pass
-            self._browser = None
-            self._context = None
-            self._page = None
+        self._browser = None
+        self._context = None
+        self._page = None
 
     def get_proxied_url(self, url: str) -> str:
         """Wrap a URL with the EZproxy prefix."""

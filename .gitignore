@@ -41,6 +41,7 @@ config.json
 chrome-profile/
 .chrome-sciencedirect/
 downloads/
+runs/
 .tmp/
 instsci/_browsers/
 

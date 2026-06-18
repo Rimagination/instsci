@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
 
+from .challenge_assist import ChallengeDetection, HumanAssistServer, detect_challenge
 from .config import Config
 from .extractors import pdf_extractor
 from .publisher_pdf_router import (
@@ -148,6 +149,9 @@ class PublisherBatchDownloader:
         pdf_timeout_sec: int = 60,
         post_login_hold_sec: int = 0,
         post_run_hold_sec: int = 0,
+        human_assist: bool = False,
+        human_assist_host: str = "127.0.0.1",
+        human_assist_port: int = 0,
     ) -> None:
         self.config = config or Config.load()
         self.profile = profile
@@ -156,6 +160,43 @@ class PublisherBatchDownloader:
         self.pdf_timeout_ms = max(1, pdf_timeout_sec) * 1_000
         self.post_login_hold_sec = max(0, int(post_login_hold_sec or 0))
         self.post_run_hold_sec = max(0, int(post_run_hold_sec or 0))
+        self.human_assist = bool(human_assist)
+        self.human_assist_host = human_assist_host or "127.0.0.1"
+        self.human_assist_port = int(human_assist_port or 0)
+        self._human_assist_server: HumanAssistServer | None = None
+        self._active_run_dir: Path | None = None
+
+    @property
+    def human_assist_url(self) -> str:
+        return self._human_assist_server.url if self._human_assist_server else ""
+
+    def _start_human_assist(self, run_dir: Path) -> str:
+        if not self.human_assist:
+            return ""
+        if self._human_assist_server:
+            return self._human_assist_server.url
+        self._human_assist_server = HumanAssistServer(
+            host=self.human_assist_host,
+            port=self.human_assist_port,
+            state_dir=run_dir / "human_assist",
+        )
+        url = self._human_assist_server.start()
+        self._human_assist_server.update({
+            "publisher": self.profile.name,
+            "status": "waiting",
+            "action": "InstSci will update this page if SSO, CAPTCHA, or browser verification appears.",
+        })
+        return url
+
+    def _update_human_assist(self, payload: dict[str, Any]) -> None:
+        if self._human_assist_server:
+            self._human_assist_server.update(payload)
+
+    def share_human_assist_from(self, other: "PublisherBatchDownloader") -> None:
+        self.human_assist = other.human_assist
+        self.human_assist_host = other.human_assist_host
+        self.human_assist_port = other.human_assist_port
+        self._human_assist_server = other._human_assist_server
 
     def run_records(
         self,
@@ -171,6 +212,7 @@ class PublisherBatchDownloader:
         """Download all records and write summary/manifest artifacts."""
         run_path = Path(run_dir)
         run_path.mkdir(parents=True, exist_ok=True)
+        self._start_human_assist(run_path)
         target = target_verified if target_verified and target_verified > 0 else None
         worker_count = min(max(1, int(concurrency or 1)), MAX_BROWSER_CONCURRENCY)
         if target:
@@ -249,6 +291,8 @@ class PublisherBatchDownloader:
         summary["attempt_cache"] = str(attempt_cache_path)
         summary["concurrency"] = worker_count
         summary["browser_profile_dir"] = str(Path(self.config.chrome_profile_dir))
+        if self.human_assist_url:
+            summary["human_assist_url"] = self.human_assist_url
         (run_path / "summary.json").write_text(
             json.dumps(summary, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -386,6 +430,7 @@ class PublisherBatchDownloader:
         return target
 
     def _launch_context(self, profile_dir: str | Path | None = None):
+        from .browser_identity import browser_launch_args, build_profile_identity, ensure_profile_identity
         from .cloakbrowser_compat import prepare_cloakbrowser_runtime
 
         prepare_cloakbrowser_runtime()
@@ -393,16 +438,26 @@ class PublisherBatchDownloader:
 
         profile_path = Path(profile_dir) if profile_dir else Path(self.config.chrome_profile_dir)
         profile_path.mkdir(parents=True, exist_ok=True)
+        ensure_profile_identity(
+            profile_path,
+            build_profile_identity(
+                self.config,
+                publisher=self.profile.name,
+                institution=self.institution_query,
+            ),
+        )
         return launch_persistent_context(
             user_data_dir=str(profile_path),
             headless=False,
             humanize=True,
             accept_downloads=True,
-            args=["--disable-features=CrossOriginOpenerPolicy"],
+            args=browser_launch_args(self.config),
         )
 
     def fetch_one(self, context: Any, record: PaperRecord, run_dir: Path) -> DownloadResult:
         page = context.new_page()
+        previous_run_dir = self._active_run_dir
+        self._active_run_dir = run_dir
         result = DownloadResult(
             doi=record.doi,
             status="failed",
@@ -411,7 +466,7 @@ class PublisherBatchDownloader:
         )
         try:
             self._event(result, "article_open", result.article_url)
-            if not self._ensure_login(page, result):
+            if not self._ensure_login_optional_run_dir(page, result, run_dir):
                 if self._article_access_available(page):
                     self._event(result, "login_completed_after_timeout", getattr(page, "url", ""))
                 else:
@@ -423,7 +478,7 @@ class PublisherBatchDownloader:
             time.sleep(2)
             if self._looks_logged_out(page):
                 self._event(result, "auth_wall_after_article_load", getattr(page, "url", ""))
-                if not self._complete_login_from_current_page(page, result):
+                if not self._complete_login_from_current_page_optional_run_dir(page, result, run_dir):
                     if self._article_access_available(page):
                         self._event(result, "login_completed_after_timeout", getattr(page, "url", ""))
                     else:
@@ -446,7 +501,7 @@ class PublisherBatchDownloader:
             if not pdf_bytes:
                 if self._looks_logged_out(page):
                     self._event(result, "auth_wall_after_pdf_attempt", getattr(page, "url", ""))
-                    if self._complete_login_from_current_page(page, result):
+                    if self._complete_login_from_current_page_optional_run_dir(page, result, run_dir):
                         result.final_url = page.url
                         result.title = self._title(page)
                         result.state = "article_loaded_after_sso"
@@ -513,6 +568,7 @@ class PublisherBatchDownloader:
             self._write_diagnostic(page, result, run_dir)
             return result
         finally:
+            self._active_run_dir = previous_run_dir
             self._hold_after_run(page, result)
             try:
                 page.close()
@@ -541,18 +597,35 @@ class PublisherBatchDownloader:
         while time.time() < deadline:
             time.sleep(min(5, max(1, int(deadline - time.time()))))
 
-    def _ensure_login(self, page: Any, result: DownloadResult) -> bool:
+    def _ensure_login_optional_run_dir(self, page: Any, result: DownloadResult, run_dir: Path | None) -> bool:
+        signature = inspect.signature(self._ensure_login)
+        if len(signature.parameters) <= 2:
+            return self._ensure_login(page, result)  # type: ignore[misc]
+        return self._ensure_login(page, result, run_dir)
+
+    def _ensure_login(self, page: Any, result: DownloadResult, run_dir: Path | None = None) -> bool:
         page.goto(result.article_url, wait_until="domcontentloaded", timeout=60_000)
         time.sleep(3)
-        if not self._wait_for_challenge(page, result):
+        if not self._wait_for_challenge(page, result, run_dir=run_dir):
             return False
         self._dismiss_cookie_banners(page, result)
         if not self._looks_logged_out(page):
             return True
 
-        return self._complete_login_from_current_page(page, result)
+        return self._complete_login_from_current_page_optional_run_dir(page, result, run_dir)
 
-    def _complete_login_from_current_page(self, page: Any, result: DownloadResult) -> bool:
+    def _complete_login_from_current_page_optional_run_dir(
+        self,
+        page: Any,
+        result: DownloadResult,
+        run_dir: Path | None,
+    ) -> bool:
+        signature = inspect.signature(self._complete_login_from_current_page)
+        if len(signature.parameters) <= 2:
+            return self._complete_login_from_current_page(page, result)  # type: ignore[misc]
+        return self._complete_login_from_current_page(page, result, run_dir)
+
+    def _complete_login_from_current_page(self, page: Any, result: DownloadResult, run_dir: Path | None = None) -> bool:
         result.state = "sso_required"
         self._event(result, "sso_start", page.url)
         self._dismiss_cookie_banners(page, result)
@@ -578,7 +651,7 @@ class PublisherBatchDownloader:
             self._dismiss_cookie_banners(page, result)
             self._click_optional_continue(page, result)
             if self._is_challenge_page(page):
-                if self._wait_for_challenge(page, result, deadline=deadline):
+                if self._wait_for_challenge(page, result, deadline=deadline, run_dir=run_dir):
                     continue
                 self._event(result, "challenge_or_viewer_timeout", self._body_text(page, 500))
                 return False
@@ -1729,7 +1802,7 @@ class PublisherBatchDownloader:
                     captured["deferred_url"] = url
                     return
                 body = response.body()
-                if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
+                if self._is_plausible_pdf_bytes(body):
                     captured["bytes"] = body
                     captured["url"] = url
             except Exception:
@@ -1771,7 +1844,7 @@ class PublisherBatchDownloader:
                             captured["deferred_url"] = response_url
                         else:
                             body = response.body()
-                            if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
+                            if self._is_plausible_pdf_bytes(body):
                                 captured["bytes"] = body
                                 captured["url"] = response.url
                     if not captured["bytes"]:
@@ -2202,7 +2275,7 @@ class PublisherBatchDownloader:
             download = download_info.value
             path = download.path()
             body = Path(path).read_bytes()
-            if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
+            if self._is_plausible_pdf_bytes(body):
                 return body, str(getattr(download, "url", "") or pdf_url)
         except Exception as exc:
             self._event(result, "download_capture_error", f"{type(exc).__name__}: {exc}")
@@ -2263,7 +2336,7 @@ class PublisherBatchDownloader:
                 download = download_info.value
                 path = download.path()
                 body = Path(path).read_bytes()
-                if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
+                if self._is_plausible_pdf_bytes(body):
                     self._event(result, "pdf_viewer_download_captured", json.dumps(detail, ensure_ascii=False))
                     return body, str(getattr(download, "url", "") or getattr(page, "url", "") or "")
             except Exception as exc:
@@ -2293,7 +2366,7 @@ class PublisherBatchDownloader:
             download = download_info.value
             path = download.path()
             body = Path(path).read_bytes()
-            if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
+            if self._is_plausible_pdf_bytes(body):
                 detail = {"selector": "pdf-viewer-toolbar-download", "x": x, "y": y}
                 self._event(result, "pdf_viewer_toolbar_download_captured", json.dumps(detail, ensure_ascii=False))
                 return body, str(getattr(download, "url", "") or getattr(page, "url", "") or "")
@@ -2351,6 +2424,20 @@ class PublisherBatchDownloader:
         message = str(exc)
         return "Download is starting" in message or "net::ERR_ABORTED" in message
 
+    @staticmethod
+    def _is_plausible_pdf_bytes(body: Any) -> bool:
+        if not isinstance(body, (bytes, bytearray)):
+            return False
+        data = bytes(body)
+        if not data.startswith(b"%PDF-") or len(data) <= MIN_PDF_BYTES:
+            return False
+        if b"\xef\xbf\xbd" in data[:64]:
+            return False
+        eof = data.rfind(b"%%EOF")
+        if eof == -1:
+            return True
+        return eof >= max(0, len(data) - 8192)
+
     def _fetch_pdf_url_with_browser_state(self, url: str, page: Any) -> tuple[bytes | None, str]:
         try:
             signature = inspect.signature(self._fetch_pdf_url)
@@ -2390,7 +2477,7 @@ class PublisherBatchDownloader:
                 allow_redirects=True,
             )
             body = resp.content
-            if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
+            if self._is_plausible_pdf_bytes(body):
                 return body, resp.url
         except Exception:
             return None, url
@@ -2532,29 +2619,46 @@ class PublisherBatchDownloader:
         doi_lower = doi.lower()
         return doi_lower in lower_url or doi_lower.replace("/", "%2f") in lower_url
 
-    def _wait_for_challenge(self, page: Any, result: DownloadResult, *, deadline: float | None = None) -> bool:
+    def _wait_for_challenge(
+        self,
+        page: Any,
+        result: DownloadResult,
+        *,
+        deadline: float | None = None,
+        run_dir: Path | None = None,
+    ) -> bool:
         wait_interval_sec = 5
         if deadline is None:
             max_checks = max(8, int(max(self.login_timeout_sec, wait_interval_sec) / wait_interval_sec))
         else:
             remaining = max(0.0, deadline - time.time())
             max_checks = max(1, int(max(remaining, wait_interval_sec) / wait_interval_sec))
+        checkpoint_run_dir = run_dir or self._active_run_dir
         waited = False
+        checkpoint_written = False
         for index in range(max_checks):
-            if self._is_challenge_page(page):
+            detection = self._challenge_detection(page)
+            if detection:
                 if not waited:
-                    self._event(result, "challenge_manual_wait", "complete verification in visible browser")
+                    self._event(result, "challenge_manual_wait", f"{detection.label}: {detection.action}")
                 waited = True
                 result.state = "challenge_or_viewer_timeout"
+                if checkpoint_run_dir is not None and not checkpoint_written:
+                    self._write_challenge_checkpoint(page, result, checkpoint_run_dir, detection, index + 1)
+                    checkpoint_written = True
                 self._event(result, "challenge_wait", str(index + 1))
                 time.sleep(wait_interval_sec)
                 continue
             if waited:
                 self._event(result, "challenge_resolved", getattr(page, "url", ""))
             return True
-        return not self._is_challenge_page(page)
+        if self._is_challenge_page(page):
+            self._event(result, "challenge_timeout", getattr(page, "url", ""))
+            return False
+        return True
 
     def _is_challenge_page(self, page: Any) -> bool:
+        return self._challenge_detection(page) is not None
         haystack = f"{self._title(page)} {self._body_text(page, 1_200)}".lower()
         direct_markers = (
             "just a moment",
@@ -2572,6 +2676,13 @@ class PublisherBatchDownloader:
             or "security service" in haystack
             or "not a robot" in haystack
             or "瀹夊叏楠岃瘉" in haystack
+        )
+
+    def _challenge_detection(self, page: Any) -> ChallengeDetection | None:
+        return detect_challenge(
+            url=str(getattr(page, "url", "") or ""),
+            title=self._title(page),
+            text=self._body_text(page, 2_000),
         )
 
     def _looks_logged_out(self, page: Any) -> bool:
@@ -2678,6 +2789,49 @@ class PublisherBatchDownloader:
     @staticmethod
     def _event(result: DownloadResult, state: str, detail: str = "") -> None:
         result.events.append({"state": state, "detail": detail[:500]})
+
+    def _write_challenge_checkpoint(
+        self,
+        page: Any,
+        result: DownloadResult,
+        run_dir: Path,
+        detection: ChallengeDetection,
+        sequence: int,
+    ) -> Path:
+        diag_dir = run_dir / "diagnostics" / safe_name(result.doi)
+        diag_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"challenge_{sequence:03d}"
+        screenshot_path = diag_dir / f"{stem}.png"
+        packet_path = diag_dir / f"{stem}.json"
+        try:
+            page.screenshot(path=str(screenshot_path), full_page=True)
+        except Exception:
+            screenshot_path = Path("")
+        self._start_human_assist(run_dir)
+        packet = {
+            "doi": result.doi,
+            "publisher": self.profile.name,
+            "url": str(getattr(page, "url", "") or ""),
+            "title": self._title(page),
+            "challenge": detection.to_dict(),
+            "body_excerpt": self._body_text(page, 2_000),
+            "screenshot_path": str(screenshot_path),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        packet_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._update_human_assist({
+            "status": "manual_verification_required",
+            "doi": result.doi,
+            "publisher": self.profile.name,
+            "url": str(getattr(page, "url", "") or ""),
+            "title": self._title(page),
+            "challenge": detection.to_dict(),
+            "action": detection.action,
+            "diagnostic_path": str(packet_path),
+            "screenshot_path": str(screenshot_path),
+        })
+        self._event(result, "challenge_checkpoint", str(packet_path))
+        return packet_path
 
     def _write_diagnostic(self, page: Any, result: DownloadResult, run_dir: Path) -> None:
         diag_dir = run_dir / "diagnostics" / safe_name(result.doi)

@@ -148,6 +148,29 @@ class SessionBrokerTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("running", result.output.lower())
 
+    def test_session_broker_state_command_reports_masked_browser_proxy(self):
+        runner = CliRunner()
+        with TemporaryDirectory() as tmp:
+            state = BrokerState(
+                publisher="elsevier",
+                profile_dir=str(Path(tmp) / "profile"),
+                pid=12345,
+                queue_dir=str(Path(tmp) / "queue"),
+                started_at="2026-06-07T00:00:00",
+                ttl_seconds=86400,
+                browser_proxy_url="socks5://reader:****@example.proxy:1080",
+                browser_proxy_url_hash="a" * 64,
+            )
+            with patch("instsci.session_broker.BROKER_ROOT", Path(tmp)), \
+                 patch("instsci.session_broker.pid_is_running", return_value=True):
+                write_broker_state(state)
+
+                result = runner.invoke(app, ["session-broker-status", "-p", "elsevier"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("socks5://reader:****@example.proxy:1080", result.output)
+        self.assertNotIn("secret", result.output)
+
 
 if __name__ == "__main__":
     unittest.main()

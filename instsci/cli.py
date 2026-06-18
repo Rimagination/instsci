@@ -504,6 +504,8 @@ def est_batch(
     console.print(f"[dim]PDF dir: {summary['pdf_dir']}[/dim]")
     console.print(f"[dim]Manifest: {summary['manifest']}[/dim]")
     console.print(f"[dim]Attempt cache: {summary['attempt_cache']}[/dim]")
+    if summary.get("human_assist_url"):
+        console.print(f"[dim]Human assist: {summary['human_assist_url']}[/dim]")
     if summary["missing"] or summary.get("unverified", 0):
         console.print("[yellow]Some items failed or were unverified; see the run manifest and diagnostics folders.[/yellow]")
         raise typer.Exit(2)
@@ -522,6 +524,9 @@ def publisher_batch(
     target_verified: int = typer.Option(0, "--target-verified", help="Stop after this many verified PDFs. Zero disables early stop."),
     attempt_cache: str = typer.Option("", "--attempt-cache", help="JSONL attempt cache path. Defaults to attempts.jsonl in the run directory."),
     skip_attempted: bool = typer.Option(False, "--skip-attempted", help="Skip DOIs already present in the attempt cache."),
+    human_assist: bool = typer.Option(False, "--human-assist", help="Expose a local status page while waiting for manual CAPTCHA/SSO checks."),
+    human_assist_host: str = typer.Option("127.0.0.1", "--human-assist-host", help="Host for the human-assist status page. Use 0.0.0.0 only on trusted LANs."),
+    human_assist_port: int = typer.Option(0, "--human-assist-port", help="Port for the human-assist status page. Zero picks a free port."),
 ):
     """Download a DOI list through a named publisher profile and CloakBrowser."""
     from .publisher_batch import PaperRecord, PublisherBatchDownloader
@@ -564,6 +569,9 @@ def publisher_batch(
         institution_query=institution,
         login_timeout_sec=login_timeout,
         pdf_timeout_sec=pdf_timeout,
+        human_assist=human_assist,
+        human_assist_host=human_assist_host,
+        human_assist_port=human_assist_port,
     )
     summary = downloader.run_records(
         records,
@@ -600,6 +608,9 @@ def papers(
     concurrency: int = typer.Option(1, "--concurrency", "-j", min=1, max=4, help="Parallel browser workers. Use 2 for ScienceDirect; higher values may trigger publisher checks."),
     broker: bool = typer.Option(True, "--broker/--no-broker", help="Use the long-lived publisher session broker by default."),
     broker_ttl: int = typer.Option(86400, "--broker-ttl", help="Seconds to keep an auto-started broker alive."),
+    human_assist: bool = typer.Option(False, "--human-assist", help="Expose a local status page while waiting for manual CAPTCHA/SSO checks."),
+    human_assist_host: str = typer.Option("127.0.0.1", "--human-assist-host", help="Host for the human-assist status page. Use 0.0.0.0 only on trusted LANs."),
+    human_assist_port: int = typer.Option(0, "--human-assist-port", help="Port for the human-assist status page. Zero picks a free port."),
 ):
     """Recommended browser workflow for closed-access publisher PDFs."""
     from .publisher_batch import PaperRecord, PublisherBatchDownloader
@@ -659,6 +670,9 @@ def papers(
                 institution=institution,
                 ttl_seconds=broker_ttl,
                 cwd=Path.cwd(),
+                human_assist=human_assist,
+                human_assist_host=human_assist_host,
+                human_assist_port=human_assist_port,
             )
             deadline = time.time() + 30
             while time.time() < deadline and not session_broker.broker_is_running(broker_publisher):
@@ -686,6 +700,8 @@ def papers(
             )
             console.print(f"[dim]PDF dir: {summary['pdf_dir']}[/dim]")
             console.print(f"[dim]Manifest: {summary['manifest']}[/dim]")
+            if summary.get("human_assist_url"):
+                console.print(f"[dim]Human assist: {summary['human_assist_url']}[/dim]")
             if summary["missing"] or summary.get("unverified", 0):
                 console.print("[yellow]Some items need manual CAPTCHA/login attention; rerun the same command after completing it.[/yellow]")
                 raise typer.Exit(2)
@@ -700,6 +716,9 @@ def papers(
         pdf_timeout_sec=pdf_timeout,
         post_login_hold_sec=post_login_hold,
         post_run_hold_sec=post_run_hold,
+        human_assist=human_assist,
+        human_assist_host=human_assist_host,
+        human_assist_port=human_assist_port,
     )
     summary = downloader.run_records(
         records,
@@ -713,6 +732,8 @@ def papers(
     )
     console.print(f"[dim]PDF dir: {summary['pdf_dir']}[/dim]")
     console.print(f"[dim]Manifest: {summary['manifest']}[/dim]")
+    if summary.get("human_assist_url"):
+        console.print(f"[dim]Human assist: {summary['human_assist_url']}[/dim]")
     if summary["missing"] or summary.get("unverified", 0):
         console.print("[yellow]Some items need manual CAPTCHA/login attention; rerun the same command after completing it.[/yellow]")
         raise typer.Exit(2)
@@ -732,15 +753,21 @@ def session_broker_status(
     table.add_column("Status")
     table.add_column("PID")
     table.add_column("Profile", overflow="fold")
+    table.add_column("Browser proxy", overflow="fold")
     table.add_column("Queue", overflow="fold")
     table.add_row(
         publisher,
         "running" if running else "stopped",
         str(state.get("pid", "")) if state else "",
         str(state.get("profile_dir", "")) if state else "",
+        str(state.get("browser_proxy_url", "")) if state else "",
         str(state.get("queue_dir", "")) if state else "",
     )
     console.print(table)
+    if state and state.get("browser_proxy_url"):
+        console.print(f"[dim]Browser proxy: {state['browser_proxy_url']}[/dim]")
+    if state and state.get("human_assist_url"):
+        console.print(f"[dim]Human assist: {state['human_assist_url']}[/dim]")
 
 
 @app.command("session-broker-stop")
@@ -761,6 +788,9 @@ def session_broker_run(
     browser_profile: str = typer.Option("", "--browser-profile"),
     institution: str = typer.Option("", "--institution"),
     ttl: int = typer.Option(86400, "--ttl"),
+    human_assist: bool = typer.Option(False, "--human-assist"),
+    human_assist_host: str = typer.Option("127.0.0.1", "--human-assist-host"),
+    human_assist_port: int = typer.Option(0, "--human-assist-port"),
 ):
     """Run the long-lived broker loop. Internal command."""
     from .publisher_batch import PaperRecord, PublisherBatchDownloader
@@ -772,6 +802,7 @@ def session_broker_run(
         cfg.chrome_profile_dir = browser_profile
     institution = _resolve_subscription_institution(cfg, institution, prompt=False)
     profile = get_publisher_profile(publisher)
+    from .browser_identity import browser_proxy_hash, mask_secret_url
     root = broker_dir(publisher)
     queue_dir = root / "queue"
     queue_dir.mkdir(parents=True, exist_ok=True)
@@ -783,6 +814,8 @@ def session_broker_run(
         started_at=datetime.now().isoformat(timespec="seconds"),
         ttl_seconds=ttl,
         heartbeat_at=datetime.now().isoformat(timespec="seconds"),
+        browser_proxy_url=mask_secret_url(cfg.browser_proxy_url),
+        browser_proxy_url_hash=browser_proxy_hash(cfg),
     )
     write_broker_state(state)
     downloader = PublisherBatchDownloader(
@@ -791,7 +824,14 @@ def session_broker_run(
         institution_query=institution,
         login_timeout_sec=900,
         pdf_timeout_sec=90,
+        human_assist=human_assist,
+        human_assist_host=human_assist_host,
+        human_assist_port=human_assist_port,
     )
+    downloader._start_human_assist(root)
+    if downloader.human_assist_url:
+        state.human_assist_url = downloader.human_assist_url
+        write_broker_state(state)
     context = downloader._launch_context()
     deadline = time.time() + max(1, ttl)
     try:
@@ -816,6 +856,7 @@ def session_broker_run(
                         post_login_hold_sec=int(job.get("post_login_hold") or 0),
                         post_run_hold_sec=int(job.get("post_run_hold") or 0),
                     )
+                    job_downloader.share_human_assist_from(downloader)
                     records = [PaperRecord(**record) for record in job.get("records", [])]
                     results = []
                     for record in records:
@@ -826,6 +867,8 @@ def session_broker_run(
                     summary["publisher"] = profile.name
                     summary["broker"] = True
                     summary["browser_profile_dir"] = cfg.chrome_profile_dir
+                    if job_downloader.human_assist_url:
+                        summary["human_assist_url"] = job_downloader.human_assist_url
                     (run_dir / "summary.json").write_text(
                         json.dumps(summary, ensure_ascii=False, indent=2),
                         encoding="utf-8",
@@ -1150,6 +1193,7 @@ def config_cmd(
     set_school: str = typer.Option("", "--school", help="Set school (use 'instsci schools' to list)."),
     set_connector_url: str = typer.Option("", "--connector-url", help="Set local SOCKS5 connector URL for EasyConnect."),
     set_proxy_url: str = typer.Option("", "--proxy-url", help="Legacy local connector URL option.", hidden=True),
+    set_browser_proxy_url: str = typer.Option("", "--browser-proxy-url", help="Set CloakBrowser-only static proxy URL for publisher workflows."),
     set_elsevier_key: str = typer.Option("", "--elsevier-api-key", help="Set Elsevier API key."),
     set_elsevier_token: str = typer.Option("", "--elsevier-inst-token", help="Set Elsevier institutional token."),
     set_federated_enable: bool = typer.Option(False, "--federated-enable", help="Enable federated institutional auth."),
@@ -1199,6 +1243,13 @@ def config_cmd(
         changed = True
         console.print(f"[green]Connector URL set to: {connector_url}[/green]")
 
+    if set_browser_proxy_url:
+        from .browser_identity import mask_secret_url
+
+        cfg.browser_proxy_url = set_browser_proxy_url
+        changed = True
+        console.print(f"[green]Browser proxy URL set to: {mask_secret_url(set_browser_proxy_url)}[/green]")
+
     if set_elsevier_key:
         cfg.elsevier_api_key = set_elsevier_key
         changed = True
@@ -1232,7 +1283,7 @@ def config_cmd(
         cfg.save()
 
     has_setter = any([set_email, set_output, set_access_url, set_webvpn_url, set_school,
-                      set_connector_url, set_proxy_url,
+                      set_connector_url, set_proxy_url, set_browser_proxy_url,
                        set_elsevier_key, set_elsevier_token,
                        set_federated_enable, set_federated_disable, set_federated_school,
                        set_carsi_enable, set_carsi_disable, set_carsi_school])
@@ -1249,6 +1300,8 @@ def config_cmd(
         console.print(f"  School:            {cfg.school} ({school_type})")
         console.print(f"  Access URL:        {_access_url(cfg)}")
         console.print(f"  Connector URL:     {cfg.proxy_url or '(not set)'}")
+        from .browser_identity import mask_secret_url
+        console.print(f"  Browser proxy URL: {mask_secret_url(cfg.browser_proxy_url) or '(not set)'}")
         console.print(f"  Email:             {cfg.email}")
         console.print(f"  Elsevier API key:  {'****' if cfg.elsevier_api_key else '(not set)'}")
         console.print(f"  Elsevier inst tok: {'****' if cfg.elsevier_inst_token else '(not set)'}")

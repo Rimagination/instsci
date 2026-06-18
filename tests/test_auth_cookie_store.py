@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
+import sys
 from tempfile import TemporaryDirectory
+import types
 import unittest
 from unittest.mock import patch
 
@@ -60,6 +62,7 @@ class AuthCookieStoreTests(unittest.TestCase):
             def __init__(self):
                 self.page = FakePage()
                 self.pages = [self.page]
+                self.closed = False
 
             def new_page(self):
                 return self.page
@@ -69,32 +72,37 @@ class AuthCookieStoreTests(unittest.TestCase):
                     {"name": "sid", "value": "1", "domain": ".sciencedirect.com", "path": "/", "expires": -1},
                 ]
 
-        class FakeBrowser:
-            def __init__(self):
-                self.context = FakeBrowserContext()
-                self.closed = False
-
-            def new_context(self):
-                return self.context
-
             def close(self):
                 self.closed = True
 
+        captured = {}
+        context = FakeBrowserContext()
+
+        def launch_persistent_context(**kwargs):
+            captured.update(kwargs)
+            return context
+
+        fake_cloakbrowser = types.SimpleNamespace(launch_persistent_context=launch_persistent_context)
+
         with TemporaryDirectory() as tmp:
             cfg = temp_config(Path(tmp))
+            cfg.browser_proxy_url = "socks5://reader:secret@example.proxy:1080"
             client = CARSIClient(cfg)
-            browser = FakeBrowser()
 
             with (
                 patch("instsci.carsi._HAS_CLOAKBROWSER", True),
-                patch("instsci.carsi.launch", return_value=browser),
+                patch.dict(sys.modules, {"cloakbrowser": fake_cloakbrowser}),
+                patch("instsci.cloakbrowser_compat.prepare_cloakbrowser_runtime"),
+                patch("instsci.carsi.launch", side_effect=AssertionError("non-persistent launch should not be used")),
                 patch("instsci.carsi.time.sleep", return_value=None),
             ):
                 self.assertTrue(client._browser_login("sciencedirect"))
 
             saved = json.loads((Path(cfg.carsi_cookie_dir) / "sciencedirect.json").read_text(encoding="utf-8"))
 
-            self.assertTrue(browser.closed)
+            self.assertTrue(context.closed)
+            self.assertEqual(captured["user_data_dir"], cfg.chrome_profile_dir)
+            self.assertIn("--proxy-server=socks5://reader:secret@example.proxy:1080", captured["args"])
             self.assertEqual(saved[0]["name"], "sid")
 
     def test_ezproxy_save_preserves_browser_session_cookie(self):
@@ -110,6 +118,49 @@ class AuthCookieStoreTests(unittest.TestCase):
 
             self.assertEqual(len(saved), 1)
             self.assertEqual(saved[0]["expires"], 0)
+
+    def test_ezproxy_login_uses_persistent_context_with_browser_proxy(self):
+        class FakePage:
+            url = "https://www.nature.com"
+
+            def goto(self, url, wait_until=None):
+                return None
+
+        class FakePersistentContext:
+            def __init__(self):
+                self.page = FakePage()
+                self.pages = [self.page]
+
+            def new_page(self):
+                return self.page
+
+            def cookies(self):
+                return [
+                    {"name": "ez", "value": "1", "domain": ".proxy.example", "path": "/", "expires": -1},
+                ]
+
+        captured = {}
+
+        def launch_persistent_context(**kwargs):
+            captured.update(kwargs)
+            return FakePersistentContext()
+
+        fake_cloakbrowser = types.SimpleNamespace(launch_persistent_context=launch_persistent_context)
+
+        with TemporaryDirectory() as tmp:
+            cfg = temp_config(Path(tmp))
+            cfg.browser_proxy_url = "socks5://reader:secret@example.proxy:1080"
+            auth = EZProxyAuth(cfg, proxy_base="https://proxy.example/login?url=")
+
+            with patch.dict(sys.modules, {"cloakbrowser": fake_cloakbrowser}), \
+                 patch("instsci.cloakbrowser_compat.prepare_cloakbrowser_runtime"), \
+                 patch("instsci.auth._HAS_CLOAKBROWSER", True), \
+                 patch("instsci.auth.launch", side_effect=AssertionError("non-persistent launch should not be used")), \
+                 patch("instsci.auth.time.sleep", return_value=None):
+                self.assertTrue(auth._browser_login())
+
+        self.assertEqual(captured["user_data_dir"], cfg.chrome_profile_dir)
+        self.assertIn("--proxy-server=socks5://reader:secret@example.proxy:1080", captured["args"])
 
 
 if __name__ == "__main__":

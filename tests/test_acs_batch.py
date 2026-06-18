@@ -567,6 +567,25 @@ class ACSBatchTests(unittest.TestCase):
         self.assertNotIn("input", profile.institution_input_selectors)
         self.assertTrue(any("Tsinghua University" in selector for selector in profile.institution_result_selectors))
 
+    def test_science_profile_has_institution_search(self):
+        profile = get_publisher_profile("science")
+
+        self.assertIn("input[placeholder='Type the name of your institution']", profile.institution_input_selectors)
+        self.assertIn("xpath=(//*[normalize-space()='Find your institution']/following::input[1])", profile.institution_input_selectors)
+        self.assertTrue(any("Tsinghua University" in selector for selector in profile.institution_result_selectors))
+
+    def test_plausible_pdf_bytes_rejects_text_corrupted_binary(self):
+        valid = b"%PDF-1.4\n" + (b"x" * MIN_PDF_BYTES) + b"\n%%EOF\n"
+        corrupted = b"%PDF-1.3\r%\xef\xbf\xbd\xef\xbf\xbd" + b"x" * MIN_PDF_BYTES + b"%%EOF" + b"tail"
+
+        self.assertTrue(PublisherBatchDownloader._is_plausible_pdf_bytes(valid))
+        self.assertFalse(PublisherBatchDownloader._is_plausible_pdf_bytes(corrupted))
+
+    def test_plausible_pdf_bytes_rejects_early_eof_with_trailing_payload(self):
+        corrupted = b"%PDF-1.4\n%%EOF\n" + (b"x" * (MIN_PDF_BYTES + 9000))
+
+        self.assertFalse(PublisherBatchDownloader._is_plausible_pdf_bytes(corrupted))
+
     def test_wiley_clicks_read_full_text_entry(self):
         class FakePage:
             def evaluate(self, _script):
@@ -1224,6 +1243,35 @@ class ACSBatchTests(unittest.TestCase):
         self.assertEqual(page.clicked, [])
         self.assertEqual(result.events[-1]["state"], "institution_required")
 
+    def test_profile_tsinghua_selectors_are_not_used_for_other_institutions(self):
+        profile = PublisherProfile(
+            name="Example",
+            article_url_template="https://example.org/doi/{doi}",
+            pdf_url_templates=(),
+            success_url_markers=("example.org/doi/",),
+            auth_url_markers=(),
+            auth_title_markers=(),
+            sso_text_markers=(),
+            institution_result_selectors=("button:has-text('Tsinghua')",),
+        )
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(
+            cfg,
+            profile=profile,
+            institution_query="Example University",
+        )
+
+        selectors = downloader._institution_result_selectors()
+
+        self.assertTrue(any("Example University" in selector for selector in selectors))
+        self.assertFalse(any("Tsinghua" in selector for selector in selectors))
+
     def test_challenge_wait_uses_login_timeout_budget(self):
         class FakeBody:
             def inner_text(self, **_kwargs):
@@ -1250,7 +1298,7 @@ class ACSBatchTests(unittest.TestCase):
             downloader._wait_for_challenge(FakePage(), result)
 
         self.assertGreaterEqual(sleep.call_count, 10)
-        self.assertEqual(result.events[-1]["state"], "challenge_wait")
+        self.assertEqual(result.events[-1]["state"], "challenge_timeout")
 
     def test_challenge_wait_ignores_article_text_with_verified_word(self):
         class FakeBody:

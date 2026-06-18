@@ -780,6 +780,18 @@ SCIENCE_PROFILE = PublisherProfile(
     base_domains=("www.science.org", "science.org"),
     pdf_url_markers=("/doi/epdf/", "/doi/pdf/", "download=true", "pdf"),
     supplementary_url_markers=("supplementary", "supplement", "suppl_file"),
+    institution_input_selectors=(
+        "input[placeholder='Type the name of your institution']",
+        "input[placeholder*='name of your institution']",
+        "xpath=(//*[normalize-space()='Find your institution']/following::input[1])",
+    ),
+    institution_result_selectors=(
+        "button:has-text('Tsinghua University')",
+        "a:has-text('Tsinghua University')",
+        "[role='option']:has-text('Tsinghua University')",
+        "li:has-text('Tsinghua University')",
+        "div:has-text('Tsinghua University')",
+    ),
 )
 
 PUBLISHER_PROFILES = {
