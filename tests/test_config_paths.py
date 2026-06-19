@@ -64,6 +64,28 @@ class ConfigPathTests(unittest.TestCase):
         self.assertEqual(cfg.browser_extension_dirs, extension_dir)
         self.assertIn(extension_dir, result.output)
 
+    def test_config_cmd_saves_browser_challenge_mode(self):
+        runner = CliRunner()
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp) / ".instsci"
+            with patch.object(config_module, "DEFAULT_BASE_DIR", base):
+                result = runner.invoke(app, ["config-cmd", "--browser-challenge-mode", "assist"])
+                cfg = Config.load()
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(cfg.browser_challenge_mode, "assist")
+        self.assertIn("Browser challenge mode set to: assist", result.output)
+
+    def test_config_cmd_rejects_auto_captcha_challenge_mode(self):
+        runner = CliRunner()
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp) / ".instsci"
+            with patch.object(config_module, "DEFAULT_BASE_DIR", base):
+                result = runner.invoke(app, ["config-cmd", "--browser-challenge-mode", "auto-captcha"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Supported browser challenge modes", result.output)
+
 
 if __name__ == "__main__":
     unittest.main()

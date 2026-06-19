@@ -224,6 +224,21 @@ class ChallengeAssistTests(unittest.TestCase):
         self.assertTrue(status["screenshot_path"].endswith("challenge_001.png"))
         self.assertIn("visible CloakBrowser", status["action"])
 
+    def test_browser_challenge_assist_mode_enables_human_assist_by_default(self):
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+            browser_challenge_mode="assist",
+        )
+
+        downloader = PublisherBatchDownloader(cfg, profile=get_publisher_profile("world-scientific"))
+
+        self.assertTrue(downloader.human_assist)
+        self.assertEqual(downloader.browser_challenge_mode, "assist")
+
 
 if __name__ == "__main__":
     unittest.main()

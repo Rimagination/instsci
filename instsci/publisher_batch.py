@@ -160,7 +160,10 @@ class PublisherBatchDownloader:
         self.pdf_timeout_ms = max(1, pdf_timeout_sec) * 1_000
         self.post_login_hold_sec = max(0, int(post_login_hold_sec or 0))
         self.post_run_hold_sec = max(0, int(post_run_hold_sec or 0))
-        self.human_assist = bool(human_assist)
+        self.browser_challenge_mode = self._normalize_browser_challenge_mode(
+            getattr(self.config, "browser_challenge_mode", "manual")
+        )
+        self.human_assist = bool(human_assist or self.browser_challenge_mode == "assist")
         self.human_assist_host = human_assist_host or "127.0.0.1"
         self.human_assist_port = int(human_assist_port or 0)
         self._human_assist_server: HumanAssistServer | None = None
@@ -187,6 +190,11 @@ class PublisherBatchDownloader:
             "action": "InstSci will update this page if SSO, CAPTCHA, or browser verification appears.",
         })
         return url
+
+    @staticmethod
+    def _normalize_browser_challenge_mode(value: str) -> str:
+        mode = str(value or "manual").strip().lower()
+        return mode if mode in {"manual", "assist"} else "manual"
 
     def _update_human_assist(self, payload: dict[str, Any]) -> None:
         if self._human_assist_server:

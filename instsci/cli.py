@@ -1208,6 +1208,7 @@ def config_cmd(
     set_browser_proxy_url: str = typer.Option("", "--browser-proxy-url", help="Set CloakBrowser-only static proxy URL for publisher workflows."),
     set_browser_extension_dirs: str = typer.Option("", "--browser-extension-dirs", help="Set semicolon-separated unpacked Chrome extension dirs for CloakBrowser."),
     set_opencli_extension_dir: str = typer.Option("", "--opencli-extension-dir", help="Set OpenCLI Browser Bridge unpacked extension dir for CloakBrowser."),
+    set_browser_challenge_mode: str = typer.Option("", "--browser-challenge-mode", help="Set challenge handling mode: manual or assist."),
     set_elsevier_key: str = typer.Option("", "--elsevier-api-key", help="Set Elsevier API key."),
     set_elsevier_token: str = typer.Option("", "--elsevier-inst-token", help="Set Elsevier institutional token."),
     set_federated_enable: bool = typer.Option(False, "--federated-enable", help="Enable federated institutional auth."),
@@ -1276,6 +1277,15 @@ def config_cmd(
         changed = True
         console.print(f"[green]Browser extension dirs set to: {extension_dirs}[/green]")
 
+    if set_browser_challenge_mode:
+        challenge_mode = set_browser_challenge_mode.strip().lower()
+        if challenge_mode not in {"manual", "assist"}:
+            console.print("[red]Supported browser challenge modes: manual, assist. CAPTCHA solving/bypass is not built in.[/red]")
+            raise typer.Exit(1)
+        cfg.browser_challenge_mode = challenge_mode
+        changed = True
+        console.print(f"[green]Browser challenge mode set to: {challenge_mode}[/green]")
+
     if set_elsevier_key:
         cfg.elsevier_api_key = set_elsevier_key
         changed = True
@@ -1310,7 +1320,7 @@ def config_cmd(
 
     has_setter = any([set_email, set_output, set_access_url, set_webvpn_url, set_school,
                       set_connector_url, set_proxy_url, set_browser_proxy_url,
-                      set_browser_extension_dirs, set_opencli_extension_dir,
+                      set_browser_extension_dirs, set_opencli_extension_dir, set_browser_challenge_mode,
                        set_elsevier_key, set_elsevier_token,
                        set_federated_enable, set_federated_disable, set_federated_school,
                        set_carsi_enable, set_carsi_disable, set_carsi_school])
@@ -1330,6 +1340,7 @@ def config_cmd(
         from .browser_identity import mask_secret_url
         console.print(f"  Browser proxy URL: {mask_secret_url(cfg.browser_proxy_url) or '(not set)'}")
         console.print(f"  Browser extensions: {cfg.browser_extension_dirs or '(not set)'}")
+        console.print(f"  Browser challenge: {cfg.browser_challenge_mode or 'manual'}")
         console.print(f"  Email:             {cfg.email}")
         console.print(f"  Elsevier API key:  {'****' if cfg.elsevier_api_key else '(not set)'}")
         console.print(f"  Elsevier inst tok: {'****' if cfg.elsevier_inst_token else '(not set)'}")
