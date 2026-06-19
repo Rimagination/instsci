@@ -136,12 +136,16 @@ class ChallengeAssistTests(unittest.TestCase):
 
             def __init__(self):
                 self.screenshots = []
+                self.front_calls = 0
 
             def title(self):
                 return "Are you a robot?"
 
             def locator(self, _selector):
                 return FakeBody(self)
+
+            def bring_to_front(self):
+                self.front_calls += 1
 
             def screenshot(self, path, full_page=True):
                 self.screenshots.append((path, full_page))
@@ -165,11 +169,60 @@ class ChallengeAssistTests(unittest.TestCase):
 
         states = [event["state"] for event in result.events]
         self.assertIn("challenge_manual_wait", states)
+        self.assertIn("challenge_window_front", states)
         self.assertIn("challenge_checkpoint", states)
         self.assertIn("challenge_timeout", states)
         self.assertEqual(checkpoint["challenge"]["kind"], "cloudflare")
+        self.assertTrue(checkpoint["foregrounded"])
         self.assertTrue(checkpoint["screenshot_path"].endswith("challenge_001.png"))
         self.assertEqual(page.screenshots[0][1], True)
+        self.assertEqual(page.front_calls, 1)
+
+    def test_challenge_human_assist_status_records_foreground_attempt(self):
+        class FakeBody:
+            def inner_text(self, **_kwargs):
+                return "Cloudflare Ray ID: abc Are you a robot? Please verify you are human."
+
+        class FakePage:
+            url = "https://example.org/challenge"
+
+            def __init__(self):
+                self.front_calls = 0
+
+            def title(self):
+                return "Are you a robot?"
+
+            def locator(self, _selector):
+                return FakeBody()
+
+            def bring_to_front(self):
+                self.front_calls += 1
+
+            def screenshot(self, path, full_page=True):
+                Path(path).write_bytes(b"png")
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(
+            cfg,
+            profile=get_publisher_profile("world-scientific"),
+            login_timeout_sec=5,
+            human_assist=True,
+        )
+        result = DownloadResult(doi="10.1142/example", status="failed")
+
+        with TemporaryDirectory() as tmp, patch("instsci.publisher_batch.time.sleep", return_value=None):
+            self.assertFalse(downloader._wait_for_challenge(FakePage(), result, run_dir=Path(tmp)))
+            status = json.loads((Path(tmp) / "human_assist" / "assist_state.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(status["foregrounded"])
+        self.assertTrue(status["screenshot_path"].endswith("challenge_001.png"))
+        self.assertIn("visible CloakBrowser", status["action"])
 
 
 if __name__ == "__main__":

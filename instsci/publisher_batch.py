@@ -2888,15 +2888,24 @@ class PublisherBatchDownloader:
         checkpoint_run_dir = run_dir or self._active_run_dir
         waited = False
         checkpoint_written = False
+        foregrounded = False
         for index in range(max_checks):
             detection = self._challenge_detection(page)
             if detection:
                 if not waited:
                     self._event(result, "challenge_manual_wait", f"{detection.label}: {detection.action}")
+                    foregrounded = self._bring_page_to_front(page, result)
                 waited = True
                 result.state = "challenge_or_viewer_timeout"
                 if checkpoint_run_dir is not None and not checkpoint_written:
-                    self._write_challenge_checkpoint(page, result, checkpoint_run_dir, detection, index + 1)
+                    self._write_challenge_checkpoint(
+                        page,
+                        result,
+                        checkpoint_run_dir,
+                        detection,
+                        index + 1,
+                        foregrounded=foregrounded,
+                    )
                     checkpoint_written = True
                 self._event(result, "challenge_wait", str(index + 1))
                 time.sleep(wait_interval_sec)
@@ -2936,6 +2945,22 @@ class PublisherBatchDownloader:
             title=self._title(page),
             text=self._body_text(page, 2_000),
         )
+
+    def _bring_page_to_front(self, page: Any, result: DownloadResult | None = None) -> bool:
+        bring_to_front = getattr(page, "bring_to_front", None)
+        if not callable(bring_to_front):
+            if result is not None:
+                self._event(result, "challenge_window_front_unavailable", getattr(page, "url", ""))
+            return False
+        try:
+            bring_to_front()
+            if result is not None:
+                self._event(result, "challenge_window_front", getattr(page, "url", ""))
+            return True
+        except Exception as exc:
+            if result is not None:
+                self._event(result, "challenge_window_front_error", f"{type(exc).__name__}: {exc}")
+            return False
 
     def _looks_logged_out(self, page: Any) -> bool:
         url = getattr(page, "url", "").lower()
@@ -3049,6 +3074,8 @@ class PublisherBatchDownloader:
         run_dir: Path,
         detection: ChallengeDetection,
         sequence: int,
+        *,
+        foregrounded: bool = False,
     ) -> Path:
         diag_dir = run_dir / "diagnostics" / safe_name(result.doi)
         diag_dir.mkdir(parents=True, exist_ok=True)
@@ -3068,6 +3095,7 @@ class PublisherBatchDownloader:
             "challenge": detection.to_dict(),
             "body_excerpt": self._body_text(page, 2_000),
             "screenshot_path": str(screenshot_path),
+            "foregrounded": bool(foregrounded),
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
         packet_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -3081,6 +3109,7 @@ class PublisherBatchDownloader:
             "action": detection.action,
             "diagnostic_path": str(packet_path),
             "screenshot_path": str(screenshot_path),
+            "foregrounded": bool(foregrounded),
         })
         self._event(result, "challenge_checkpoint", str(packet_path))
         return packet_path
