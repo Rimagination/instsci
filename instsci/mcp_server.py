@@ -267,6 +267,8 @@ async def plan_publisher_pdf_workflow(
     publisher: str = "auto",
     institution: str = "",
     output: str = "runs/papers",
+    speed: str = "balanced",
+    concurrency: int = 1,
     format: str = "json",
 ) -> str:
     """Plan the visible CloakBrowser workflow for closed-access publisher PDFs.
@@ -279,6 +281,8 @@ async def plan_publisher_pdf_workflow(
         publisher: "auto" for instsci papers, or a publisher profile key/alias.
         institution: Subscription institution search text. If empty, config is checked.
         output: Run output directory.
+        speed: Browser speed preset - "careful", "balanced", or "fast".
+        concurrency: Requested browser workers. Only speed="fast" uses more than one worker.
         format: Output format - "json" (default) or "markdown".
     """
     if not doi_file.strip():
@@ -298,6 +302,22 @@ async def plan_publisher_pdf_workflow(
         resolved_institution, institution_source = _institution_from_config(config)
 
     publisher_value = publisher.strip() or "auto"
+    speed_value = (speed or "balanced").strip().lower()
+    if speed_value not in {"careful", "balanced", "fast"}:
+        payload = {
+            "status": "unsupported_speed",
+            "speed": speed,
+            "known_speeds": ["careful", "balanced", "fast"],
+            "next_action": "Choose careful, balanced, or fast. Balanced keeps one live CloakBrowser context by default.",
+        }
+        return _format_plan_markdown(payload) if format.lower() == "markdown" else _json_response(payload)
+    try:
+        requested_concurrency = int(concurrency or 1)
+    except (TypeError, ValueError):
+        requested_concurrency = 1
+    requested_concurrency = max(1, requested_concurrency)
+    effective_concurrency = min(requested_concurrency, 2) if speed_value == "fast" else 1
+
     if publisher_value.lower() == "auto":
         workflow_command = "instsci papers"
         publisher_arg = "auto"
@@ -311,6 +331,8 @@ async def plan_publisher_pdf_workflow(
             resolved_institution or "Institution Name",
             "--output",
             output,
+            "--speed",
+            speed_value,
         ]
     else:
         try:
@@ -336,7 +358,11 @@ async def plan_publisher_pdf_workflow(
             resolved_institution or "Institution Name",
             "--output",
             output,
+            "--speed",
+            speed_value,
         ]
+    if speed_value == "fast" and effective_concurrency != 1:
+        argv.extend(["--concurrency", str(effective_concurrency)])
 
     command = _command_from_argv(argv)
     status = "ready" if resolved_institution else "institution_required"
@@ -361,6 +387,8 @@ async def plan_publisher_pdf_workflow(
             ),
         },
         "publisher": publisher_arg,
+        "speed": speed_value,
+        "concurrency": effective_concurrency,
         "doi_file": doi_file,
         "output": output,
         "next_action": next_action,

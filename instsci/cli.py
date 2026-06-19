@@ -127,6 +127,191 @@ def _resolve_subscription_institution(
     return value
 
 
+_BROWSER_SPEED_MODES = ("careful", "balanced", "fast")
+
+
+def _normalize_speed_mode(speed: str) -> str:
+    value = (speed or "balanced").strip().lower()
+    if value not in _BROWSER_SPEED_MODES:
+        allowed = ", ".join(_BROWSER_SPEED_MODES)
+        raise ValueError(f"Unsupported speed mode '{speed}'. Available: {allowed}")
+    return value
+
+
+def _effective_browser_concurrency(speed: str, requested: int) -> int:
+    """Return browser worker count without surprising users with extra sessions."""
+    speed_mode = _normalize_speed_mode(speed)
+    try:
+        requested_value = int(requested)
+    except (TypeError, ValueError):
+        requested_value = 1
+    requested_value = max(1, requested_value)
+    if speed_mode == "fast":
+        return min(requested_value, 2)
+    return 1
+
+
+def _publisher_profile_key(profile) -> str:
+    from .publisher_profiles import PUBLISHER_PROFILES
+
+    for key, candidate in PUBLISHER_PROFILES.items():
+        if candidate == profile:
+            return key
+    return profile.name.strip().lower().replace(" ", "-")
+
+
+def _group_records_by_publisher(records, publisher: str):
+    from .publisher_profiles import get_publisher_profile, infer_publisher_profile, list_publisher_profiles
+
+    requested = (publisher or "auto").strip()
+    if requested.lower() != "auto":
+        profile = get_publisher_profile(requested)
+        return [(_publisher_profile_key(profile), profile, list(records))]
+
+    groups: dict[str, list] = {}
+    unresolved: list[str] = []
+    for record in records:
+        doi = getattr(record, "doi", "")
+        profile = infer_publisher_profile(doi)
+        if profile is None:
+            unresolved.append(doi)
+            continue
+        key = _publisher_profile_key(profile)
+        if key not in groups:
+            groups[key] = [profile, []]
+        groups[key][1].append(record)
+
+    if unresolved:
+        available = ", ".join(list_publisher_profiles())
+        sample = ", ".join(unresolved[:5])
+        more = f" and {len(unresolved) - 5} more" if len(unresolved) > 5 else ""
+        raise ValueError(
+            f"Could not infer publisher for DOI(s): {sample}{more}. "
+            f"Use --publisher with one of: {available}."
+        )
+    return [(key, values[0], values[1]) for key, values in groups.items()]
+
+
+def _broker_records(records) -> list[dict[str, str]]:
+    return [
+        {
+            "doi": record.doi,
+            "title": record.title,
+            "published": record.published,
+            "url": record.url,
+        }
+        for record in records
+    ]
+
+
+def _print_speed_notice(speed_mode: str, requested: int, effective: int, *, broker: bool = False) -> None:
+    if broker:
+        console.print("[dim]Session broker reuses one live CloakBrowser context per publisher.[/dim]")
+    if speed_mode != "fast" and requested > 1:
+        console.print(
+            f"[dim]Speed mode '{speed_mode}' keeps one browser context; "
+            f"requested --concurrency {requested} is held at 1.[/dim]"
+        )
+    elif speed_mode == "fast" and requested > effective:
+        console.print(
+            f"[yellow]Fast mode caps browser workers at {effective} to reduce publisher challenge risk.[/yellow]"
+        )
+
+
+def _print_download_summary(summary: dict, *, include_attempt_cache: bool = False) -> None:
+    console.print(
+        f"[bold]Done:[/bold] {summary['success']}/{summary['count']} verified PDFs, "
+        f"{summary.get('unverified', 0)} unverified PDFs."
+    )
+    if summary.get("pdf_dir"):
+        console.print(f"[dim]PDF dir: {summary['pdf_dir']}[/dim]")
+    if summary.get("manifest"):
+        console.print(f"[dim]Manifest: {summary['manifest']}[/dim]")
+    if include_attempt_cache and summary.get("attempt_cache"):
+        console.print(f"[dim]Attempt cache: {summary['attempt_cache']}[/dim]")
+    if summary.get("human_assist_url"):
+        console.print(f"[dim]Human assist: {summary['human_assist_url']}[/dim]")
+
+
+def _run_papers_group(
+    *,
+    cfg: Config,
+    profile,
+    publisher_key: str,
+    records,
+    run_dir: Path,
+    institution: str,
+    login_timeout: int,
+    pdf_timeout: int,
+    post_login_hold: int,
+    post_run_hold: int,
+    retry_failed: bool,
+    concurrency: int,
+    broker: bool,
+    broker_ttl: int,
+    human_assist: bool,
+    human_assist_host: str,
+    human_assist_port: int,
+) -> dict:
+    from .publisher_batch import PublisherBatchDownloader
+
+    if broker:
+        from . import session_broker
+
+        if not session_broker.broker_is_running(publisher_key):
+            console.print(f"[dim]Starting publisher session broker: {publisher_key}[/dim]")
+            session_broker.start_broker_process(
+                publisher=publisher_key,
+                browser_profile=cfg.chrome_profile_dir,
+                institution=institution,
+                ttl_seconds=broker_ttl,
+                cwd=Path.cwd(),
+                human_assist=human_assist,
+                human_assist_host=human_assist_host,
+                human_assist_port=human_assist_port,
+            )
+            deadline = time.time() + 30
+            while time.time() < deadline and not session_broker.broker_is_running(publisher_key):
+                time.sleep(1)
+        if session_broker.broker_is_running(publisher_key):
+            console.print(f"[bold]Session broker:[/bold] running ({publisher_key})")
+            timeout_seconds = max(
+                120,
+                login_timeout + len(records) * (pdf_timeout + post_login_hold + post_run_hold + 60),
+            )
+            return session_broker.submit_broker_job(
+                publisher=publisher_key,
+                records=_broker_records(records),
+                output_dir=str(run_dir),
+                institution=institution,
+                login_timeout=login_timeout,
+                pdf_timeout=pdf_timeout,
+                post_login_hold=post_login_hold,
+                post_run_hold=post_run_hold,
+                timeout_seconds=timeout_seconds,
+            )
+        console.print("[yellow]Session broker did not start; falling back to one-shot browser workflow.[/yellow]")
+
+    downloader = PublisherBatchDownloader(
+        cfg,
+        profile=profile,
+        institution_query=institution,
+        login_timeout_sec=login_timeout,
+        pdf_timeout_sec=pdf_timeout,
+        post_login_hold_sec=post_login_hold,
+        post_run_hold_sec=post_run_hold,
+        human_assist=human_assist,
+        human_assist_host=human_assist_host,
+        human_assist_port=human_assist_port,
+    )
+    return downloader.run_records(
+        records,
+        run_dir,
+        retry_failed=retry_failed,
+        concurrency=concurrency,
+    )
+
+
 def _path_status(path_value: str) -> tuple[str, str]:
     if not path_value:
         return "missing", ""
@@ -533,6 +718,8 @@ def publisher_batch(
     institution: str = typer.Option("", "--institution", help="Subscription institution search text. Omit to use configured institution or prompt."),
     login_timeout: int = typer.Option(900, "--login-timeout", help="Seconds to wait for manual SSO/2FA completion."),
     pdf_timeout: int = typer.Option(60, "--pdf-timeout", help="Seconds to wait for each candidate PDF navigation."),
+    speed: str = typer.Option("balanced", "--speed", help="Speed preset: careful/balanced reuse one browser context; fast permits up to 2 workers."),
+    concurrency: int = typer.Option(1, "--concurrency", "-j", min=1, max=4, help="Requested browser workers. Only --speed fast uses more than one context."),
     target_verified: int = typer.Option(0, "--target-verified", help="Stop after this many verified PDFs. Zero disables early stop."),
     attempt_cache: str = typer.Option("", "--attempt-cache", help="JSONL attempt cache path. Defaults to attempts.jsonl in the run directory."),
     skip_attempted: bool = typer.Option(False, "--skip-attempted", help="Skip DOIs already present in the attempt cache."),
@@ -563,16 +750,25 @@ def publisher_batch(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
+    try:
+        speed_mode = _normalize_speed_mode(speed)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    effective_concurrency = _effective_browser_concurrency(speed_mode, concurrency)
+
     cfg = Config.load()
     if browser_profile:
         cfg.chrome_profile_dir = browser_profile
     institution = _resolve_subscription_institution(cfg, institution)
-    profile_key = publisher.strip().lower().replace(" ", "-")
+    profile_key = _publisher_profile_key(profile)
     run_dir = Path(output) if output else Path("downloads") / f"{profile_key}_{len(records)}" / f"cloak_{datetime.now():%Y%m%d_%H%M%S}"
     console.print(f"[bold]Publisher profile:[/bold] {profile.name}")
     console.print(f"[bold]Found {len(records)} DOI records.[/bold]")
     console.print(f"[bold]Output:[/bold] {run_dir}")
     console.print(f"[bold]Browser profile:[/bold] {cfg.chrome_profile_dir}")
+    console.print(f"[bold]Speed:[/bold] {speed_mode} (browser workers: {effective_concurrency})")
+    _print_speed_notice(speed_mode, concurrency, effective_concurrency)
     console.print("[dim]If a CloakBrowser window stops on SSO or 2FA, complete it there and leave the window open.[/dim]")
 
     downloader = PublisherBatchDownloader(
@@ -592,14 +788,9 @@ def publisher_batch(
         target_verified=target_verified or None,
         attempt_cache=attempt_cache or None,
         skip_attempted=skip_attempted,
+        concurrency=effective_concurrency,
     )
-    console.print(
-        f"[bold]Done:[/bold] {summary['success']}/{summary['count']} verified PDFs, "
-        f"{summary.get('unverified', 0)} unverified PDFs."
-    )
-    console.print(f"[dim]PDF dir: {summary['pdf_dir']}[/dim]")
-    console.print(f"[dim]Manifest: {summary['manifest']}[/dim]")
-    console.print(f"[dim]Attempt cache: {summary['attempt_cache']}[/dim]")
+    _print_download_summary(summary, include_attempt_cache=True)
     if summary["missing"] or summary.get("unverified", 0):
         console.print("[yellow]Some items failed or were unverified; see the run manifest and diagnostics folders.[/yellow]")
         raise typer.Exit(2)
@@ -617,7 +808,8 @@ def papers(
     post_login_hold: int = typer.Option(0, "--post-login-hold", help="Seconds to keep the authorized article page open before PDF capture."),
     post_run_hold: int = typer.Option(0, "--post-run-hold", help="Seconds to keep the browser page open after capture or failure."),
     retry_failed: bool = typer.Option(True, "--retry/--no-retry", help="Retry transient failures in a fresh browser context."),
-    concurrency: int = typer.Option(1, "--concurrency", "-j", min=1, max=4, help="Parallel browser workers. Use 2 for ScienceDirect; higher values may trigger publisher checks."),
+    speed: str = typer.Option("balanced", "--speed", help="Speed preset: careful/balanced reuse one broker browser; fast permits up to 2 fallback workers."),
+    concurrency: int = typer.Option(1, "--concurrency", "-j", min=1, max=4, help="Requested browser workers. Broker mode stays single-context; only --speed fast uses more than one fallback worker."),
     broker: bool = typer.Option(True, "--broker/--no-broker", help="Use the long-lived publisher session broker by default."),
     broker_ttl: int = typer.Option(86400, "--broker-ttl", help="Seconds to keep an auto-started broker alive."),
     human_assist: bool = typer.Option(False, "--human-assist", help="Expose a local status page while waiting for manual CAPTCHA/SSO checks."),
@@ -625,8 +817,7 @@ def papers(
     human_assist_port: int = typer.Option(0, "--human-assist-port", help="Port for the human-assist status page. Zero picks a free port."),
 ):
     """Recommended browser workflow for closed-access publisher PDFs."""
-    from .publisher_batch import PaperRecord, PublisherBatchDownloader
-    from .publisher_profiles import get_publisher_profile, infer_publisher_profile, list_publisher_profiles
+    from .publisher_batch import PaperRecord
 
     if not file.exists():
         console.print(f"[red]File not found: {file}[/red]")
@@ -641,112 +832,104 @@ def papers(
         console.print("[yellow]No DOIs found in file.[/yellow]")
         raise typer.Exit(0)
 
-    if publisher.strip().lower() == "auto":
-        inferred = [infer_publisher_profile(record.doi) for record in records]
-        profiles = {profile for profile in inferred if profile is not None}
-        if len(profiles) != 1 or len(profiles) != len(set(inferred)):
-            console.print("[red]Could not infer one publisher for all DOIs.[/red]")
-            console.print(f"[yellow]Use --publisher with one of: {', '.join(list_publisher_profiles())}.[/yellow]")
-            raise typer.Exit(1)
-        profile = profiles.pop()
-    else:
-        try:
-            profile = get_publisher_profile(publisher)
-        except ValueError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(1) from exc
+    try:
+        speed_mode = _normalize_speed_mode(speed)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    effective_concurrency = _effective_browser_concurrency(speed_mode, concurrency)
+
+    try:
+        publisher_groups = _group_records_by_publisher(records, publisher)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
 
     cfg = Config.load()
     if browser_profile:
         cfg.chrome_profile_dir = browser_profile
     institution = _resolve_subscription_institution(cfg, institution)
-    profile_key = profile.name.lower().replace(" ", "-")
-    run_dir = Path(output) if output else Path("downloads") / f"papers_{profile_key}_{len(records)}" / f"browser_{datetime.now():%Y%m%d_%H%M%S}"
 
-    console.print(f"[bold]Recommended route:[/bold] browser-based publisher workflow ({profile.name})")
+    multi_publisher = len(publisher_groups) > 1
+    if multi_publisher:
+        run_dir = Path(output) if output else Path("downloads") / f"papers_auto_{len(records)}" / f"browser_{datetime.now():%Y%m%d_%H%M%S}"
+    else:
+        profile_key, _profile, _group_records = publisher_groups[0]
+        run_dir = Path(output) if output else Path("downloads") / f"papers_{profile_key}_{len(records)}" / f"browser_{datetime.now():%Y%m%d_%H%M%S}"
+
+    console.print("[bold]Recommended route:[/bold] browser-based publisher workflow")
     console.print("[dim]Complete SSO, 2FA, or CAPTCHA in the opened browser window; InstSci continues automatically.[/dim]")
     console.print(f"[bold]Found {len(records)} DOI records.[/bold]")
+    if multi_publisher:
+        group_labels = ", ".join(f"{profile.name}={len(group_records)}" for _key, profile, group_records in publisher_groups)
+        console.print(f"[bold]Publisher groups:[/bold] {group_labels}")
     console.print(f"[bold]Output:[/bold] {run_dir}")
     console.print(f"[bold]Browser profile:[/bold] {cfg.chrome_profile_dir}")
+    console.print(f"[bold]Speed:[/bold] {speed_mode} (fallback browser workers: {effective_concurrency})")
+    _print_speed_notice(speed_mode, concurrency, effective_concurrency, broker=broker)
 
-    profile_key_arg = publisher.strip().lower().replace(" ", "-")
-    broker_publisher = profile_key_arg if profile_key_arg != "auto" else profile.name.lower().replace(" ", "-")
-    if broker:
-        from . import session_broker
+    group_summaries: list[tuple[str, str, Path, dict]] = []
+    for publisher_key, profile, group_records in publisher_groups:
+        group_run_dir = run_dir / publisher_key if multi_publisher else run_dir
+        if multi_publisher:
+            console.print(f"[bold]Publisher group:[/bold] {profile.name} ({len(group_records)} DOI records)")
+        else:
+            console.print(f"[bold]Publisher profile:[/bold] {profile.name}")
+        summary = _run_papers_group(
+            cfg=cfg,
+            profile=profile,
+            publisher_key=publisher_key,
+            records=group_records,
+            run_dir=group_run_dir,
+            institution=institution,
+            login_timeout=login_timeout,
+            pdf_timeout=pdf_timeout,
+            post_login_hold=post_login_hold,
+            post_run_hold=post_run_hold,
+            retry_failed=retry_failed,
+            concurrency=effective_concurrency,
+            broker=broker,
+            broker_ttl=broker_ttl,
+            human_assist=human_assist,
+            human_assist_host=human_assist_host,
+            human_assist_port=human_assist_port,
+        )
+        group_summaries.append((publisher_key, profile.name, group_run_dir, summary))
+        _print_download_summary(summary)
 
-        if not session_broker.broker_is_running(broker_publisher):
-            console.print(f"[dim]Starting publisher session broker: {broker_publisher}[/dim]")
-            session_broker.start_broker_process(
-                publisher=broker_publisher,
-                browser_profile=cfg.chrome_profile_dir,
-                institution=institution,
-                ttl_seconds=broker_ttl,
-                cwd=Path.cwd(),
-                human_assist=human_assist,
-                human_assist_host=human_assist_host,
-                human_assist_port=human_assist_port,
-            )
-            deadline = time.time() + 30
-            while time.time() < deadline and not session_broker.broker_is_running(broker_publisher):
-                time.sleep(1)
-        if session_broker.broker_is_running(broker_publisher):
-            console.print(f"[bold]Session broker:[/bold] running ({broker_publisher})")
-            timeout_seconds = max(
-                120,
-                login_timeout + len(records) * (pdf_timeout + post_login_hold + post_run_hold + 60),
-            )
-            summary = session_broker.submit_broker_job(
-                publisher=broker_publisher,
-                records=[{"doi": record.doi, "title": record.title, "published": record.published, "url": record.url} for record in records],
-                output_dir=str(run_dir),
-                institution=institution,
-                login_timeout=login_timeout,
-                pdf_timeout=pdf_timeout,
-                post_login_hold=post_login_hold,
-                post_run_hold=post_run_hold,
-                timeout_seconds=timeout_seconds,
-            )
-            console.print(
-                f"[bold]Done:[/bold] {summary['success']}/{summary['count']} verified PDFs, "
-                f"{summary.get('unverified', 0)} unverified PDFs."
-            )
-            console.print(f"[dim]PDF dir: {summary['pdf_dir']}[/dim]")
-            console.print(f"[dim]Manifest: {summary['manifest']}[/dim]")
-            if summary.get("human_assist_url"):
-                console.print(f"[dim]Human assist: {summary['human_assist_url']}[/dim]")
-            if summary["missing"] or summary.get("unverified", 0):
-                console.print("[yellow]Some items need manual CAPTCHA/login attention; rerun the same command after completing it.[/yellow]")
-                raise typer.Exit(2)
-            return
-        console.print("[yellow]Session broker did not start; falling back to one-shot browser workflow.[/yellow]")
+    if multi_publisher:
+        aggregate = {
+            "publisher": "auto",
+            "grouped_by_publisher": True,
+            "speed": speed_mode,
+            "concurrency": effective_concurrency,
+            "browser_profile_dir": cfg.chrome_profile_dir,
+            "count": sum(int(summary.get("count", 0)) for _key, _name, _dir, summary in group_summaries),
+            "success": sum(int(summary.get("success", 0)) for _key, _name, _dir, summary in group_summaries),
+            "missing": sum(int(summary.get("missing", 0)) for _key, _name, _dir, summary in group_summaries),
+            "unverified": sum(int(summary.get("unverified", 0)) for _key, _name, _dir, summary in group_summaries),
+            "groups": [
+                {
+                    "publisher_key": publisher_key,
+                    "publisher": publisher_name,
+                    "output_dir": str(group_dir),
+                    "summary": str(group_dir / "summary.json"),
+                    "count": summary.get("count", 0),
+                    "success": summary.get("success", 0),
+                    "missing": summary.get("missing", 0),
+                    "unverified": summary.get("unverified", 0),
+                }
+                for publisher_key, publisher_name, group_dir, summary in group_summaries
+            ],
+        }
+        run_dir.mkdir(parents=True, exist_ok=True)
+        aggregate_path = run_dir / "summary.json"
+        aggregate_path.write_text(json.dumps(aggregate, ensure_ascii=False, indent=2), encoding="utf-8")
+        console.print(f"[dim]Aggregate summary: {aggregate_path}[/dim]")
 
-    downloader = PublisherBatchDownloader(
-        cfg,
-        profile=profile,
-        institution_query=institution,
-        login_timeout_sec=login_timeout,
-        pdf_timeout_sec=pdf_timeout,
-        post_login_hold_sec=post_login_hold,
-        post_run_hold_sec=post_run_hold,
-        human_assist=human_assist,
-        human_assist_host=human_assist_host,
-        human_assist_port=human_assist_port,
-    )
-    summary = downloader.run_records(
-        records,
-        run_dir,
-        retry_failed=retry_failed,
-        concurrency=concurrency,
-    )
-    console.print(
-        f"[bold]Done:[/bold] {summary['success']}/{summary['count']} verified PDFs, "
-        f"{summary.get('unverified', 0)} unverified PDFs."
-    )
-    console.print(f"[dim]PDF dir: {summary['pdf_dir']}[/dim]")
-    console.print(f"[dim]Manifest: {summary['manifest']}[/dim]")
-    if summary.get("human_assist_url"):
-        console.print(f"[dim]Human assist: {summary['human_assist_url']}[/dim]")
-    if summary["missing"] or summary.get("unverified", 0):
+    missing_total = sum(int(summary.get("missing", 0)) for _key, _name, _dir, summary in group_summaries)
+    unverified_total = sum(int(summary.get("unverified", 0)) for _key, _name, _dir, summary in group_summaries)
+    if missing_total or unverified_total:
         console.print("[yellow]Some items need manual CAPTCHA/login attention; rerun the same command after completing it.[/yellow]")
         raise typer.Exit(2)
 

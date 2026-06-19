@@ -338,6 +338,9 @@ class MCPFetchResultTests(unittest.TestCase):
         self.assertEqual(payload["publisher"], "auto")
         self.assertNotIn("command", payload)
         self.assertIn("instsci papers dois.txt --publisher auto", payload["command_template"])
+        self.assertIn("--speed balanced", payload["command_template"])
+        self.assertEqual(payload["speed"], "balanced")
+        self.assertEqual(payload["concurrency"], 1)
         self.assertIn("Institution Name", payload["command_template"])
         self.assertNotIn("Tsinghua", payload["command_template"])
 
@@ -366,8 +369,34 @@ class MCPFetchResultTests(unittest.TestCase):
         self.assertEqual(payload["institution"]["value"], "Example University")
         self.assertIn("instsci publisher-batch D:/runs/dois.txt", payload["command"])
         self.assertIn("--publisher elsevier", payload["command"])
+        self.assertIn("--speed balanced", payload["command"])
         self.assertIn("'Example University'", payload["command"])
         self.assertEqual(payload["final_pdf_verdict_requires"], "visible_cloakbrowser")
+
+    def test_mcp_plans_fast_mode_with_capped_concurrency(self):
+        from instsci import mcp_server
+
+        with TemporaryDirectory() as tmp:
+            config = _config(Path(tmp), school="")
+            with patch.object(mcp_server.Config, "load", return_value=config):
+                payload = json.loads(
+                    asyncio.run(
+                        mcp_server.plan_publisher_pdf_workflow(
+                            "dois.txt",
+                            publisher="auto",
+                            institution="Example University",
+                            speed="fast",
+                            concurrency=4,
+                            format="json",
+                        )
+                    )
+                )
+
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["speed"], "fast")
+        self.assertEqual(payload["concurrency"], 2)
+        self.assertIn("--speed fast", payload["command"])
+        self.assertIn("--concurrency 2", payload["command"])
 
     def test_fetch_paper_json_returns_structured_result(self):
         from instsci import mcp_server
