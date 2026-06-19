@@ -51,6 +51,19 @@ class ConfigPathTests(unittest.TestCase):
         self.assertIn("socks5://reader:****@example.proxy:1080", result.output)
         self.assertNotIn("secret", result.output)
 
+    def test_config_cmd_saves_opencli_extension_dir(self):
+        runner = CliRunner()
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp) / ".instsci"
+            extension_dir = str(Path(tmp) / "opencli-extension")
+            with patch.object(config_module, "DEFAULT_BASE_DIR", base):
+                result = runner.invoke(app, ["config-cmd", "--opencli-extension-dir", extension_dir])
+                cfg = Config.load()
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(cfg.browser_extension_dirs, extension_dir)
+        self.assertIn(extension_dir, result.output)
+
 
 if __name__ == "__main__":
     unittest.main()

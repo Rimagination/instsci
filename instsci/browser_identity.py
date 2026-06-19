@@ -48,6 +48,24 @@ def browser_proxy_hash(config: Config) -> str:
     return hashlib.sha256(proxy_url.encode("utf-8")).hexdigest()
 
 
+def browser_extension_paths(config: Config) -> list[str]:
+    """Return configured unpacked Chrome extension directories for CloakBrowser."""
+    raw_value = str(getattr(config, "browser_extension_dirs", "") or "")
+    paths: list[str] = []
+    for chunk in raw_value.replace("\n", ";").split(";"):
+        value = chunk.strip().strip('"').strip("'")
+        if value:
+            paths.append(str(Path(value).expanduser()))
+    return paths
+
+
+def browser_extension_hash(config: Config) -> str:
+    paths = browser_extension_paths(config)
+    if not paths:
+        return ""
+    return hashlib.sha256("\n".join(paths).encode("utf-8")).hexdigest()
+
+
 def browser_launch_args(config: Config, *, bypass_proxy: bool = False) -> list[str]:
     """Return CloakBrowser launch args for the configured browser identity."""
     args = list(BASE_BROWSER_ARGS)
@@ -67,6 +85,8 @@ def build_profile_identity(config: Config, *, publisher: str, institution: str =
         "institution": str(institution or "").strip(),
         "browser_proxy_url": mask_secret_url(proxy_url),
         "browser_proxy_url_hash": browser_proxy_hash(config),
+        "browser_extension_count": len(browser_extension_paths(config)),
+        "browser_extension_hash": browser_extension_hash(config),
         "publishers": [_normalize_publisher(publisher)] if publisher else [],
         "cloakbrowser_version": _cloakbrowser_version(),
     }
@@ -117,7 +137,7 @@ def _identity_change(existing: dict[str, Any], identity: dict[str, Any], changed
     if not existing:
         return None
     changed_fields = []
-    for field in ("institution", "browser_proxy_url_hash"):
+    for field in ("institution", "browser_proxy_url_hash", "browser_extension_hash"):
         old = str(existing.get(field, "") or "")
         new = str(identity.get(field, "") or "")
         if old and new and old != new:

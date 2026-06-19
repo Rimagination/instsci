@@ -152,6 +152,18 @@ def _show_setup_check(cfg: Config) -> bool:
     ]:
         status, detail = _path_status(path_value)
         checks.append((label, status, detail))
+    from .browser_identity import browser_extension_paths
+
+    extension_paths = browser_extension_paths(cfg)
+    if extension_paths:
+        missing_extensions = [path for path in extension_paths if not Path(path).is_dir()]
+        checks.append((
+            "Browser extensions",
+            "missing" if missing_extensions else "ok",
+            "; ".join(extension_paths),
+        ))
+    else:
+        checks.append(("Browser extensions", "ok", "not configured"))
 
     table = Table(title="InstSci Environment Check")
     table.add_column("Item", width=18)
@@ -1194,6 +1206,8 @@ def config_cmd(
     set_connector_url: str = typer.Option("", "--connector-url", help="Set local SOCKS5 connector URL for EasyConnect."),
     set_proxy_url: str = typer.Option("", "--proxy-url", help="Legacy local connector URL option.", hidden=True),
     set_browser_proxy_url: str = typer.Option("", "--browser-proxy-url", help="Set CloakBrowser-only static proxy URL for publisher workflows."),
+    set_browser_extension_dirs: str = typer.Option("", "--browser-extension-dirs", help="Set semicolon-separated unpacked Chrome extension dirs for CloakBrowser."),
+    set_opencli_extension_dir: str = typer.Option("", "--opencli-extension-dir", help="Set OpenCLI Browser Bridge unpacked extension dir for CloakBrowser."),
     set_elsevier_key: str = typer.Option("", "--elsevier-api-key", help="Set Elsevier API key."),
     set_elsevier_token: str = typer.Option("", "--elsevier-inst-token", help="Set Elsevier institutional token."),
     set_federated_enable: bool = typer.Option(False, "--federated-enable", help="Enable federated institutional auth."),
@@ -1250,6 +1264,18 @@ def config_cmd(
         changed = True
         console.print(f"[green]Browser proxy URL set to: {mask_secret_url(set_browser_proxy_url)}[/green]")
 
+    extension_dirs = set_browser_extension_dirs
+    if set_opencli_extension_dir:
+        extension_dirs = (
+            f"{set_opencli_extension_dir};{extension_dirs}"
+            if extension_dirs
+            else set_opencli_extension_dir
+        )
+    if extension_dirs:
+        cfg.browser_extension_dirs = extension_dirs
+        changed = True
+        console.print(f"[green]Browser extension dirs set to: {extension_dirs}[/green]")
+
     if set_elsevier_key:
         cfg.elsevier_api_key = set_elsevier_key
         changed = True
@@ -1284,6 +1310,7 @@ def config_cmd(
 
     has_setter = any([set_email, set_output, set_access_url, set_webvpn_url, set_school,
                       set_connector_url, set_proxy_url, set_browser_proxy_url,
+                      set_browser_extension_dirs, set_opencli_extension_dir,
                        set_elsevier_key, set_elsevier_token,
                        set_federated_enable, set_federated_disable, set_federated_school,
                        set_carsi_enable, set_carsi_disable, set_carsi_school])
@@ -1302,6 +1329,7 @@ def config_cmd(
         console.print(f"  Connector URL:     {cfg.proxy_url or '(not set)'}")
         from .browser_identity import mask_secret_url
         console.print(f"  Browser proxy URL: {mask_secret_url(cfg.browser_proxy_url) or '(not set)'}")
+        console.print(f"  Browser extensions: {cfg.browser_extension_dirs or '(not set)'}")
         console.print(f"  Email:             {cfg.email}")
         console.print(f"  Elsevier API key:  {'****' if cfg.elsevier_api_key else '(not set)'}")
         console.print(f"  Elsevier inst tok: {'****' if cfg.elsevier_inst_token else '(not set)'}")

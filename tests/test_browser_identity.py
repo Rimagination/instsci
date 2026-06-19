@@ -6,6 +6,7 @@ import types
 import unittest
 from unittest.mock import patch
 
+import instsci.browser_identity as browser_identity
 from instsci.browser_identity import (
     browser_launch_args,
     build_profile_identity,
@@ -29,6 +30,14 @@ class BrowserIdentityTests(unittest.TestCase):
         self.assertIn("--disable-features=CrossOriginOpenerPolicy", args)
         self.assertIn("--proxy-server=socks5://reader:secret@example.proxy:1080", args)
         self.assertNotIn("--proxy-server=socks5://127.0.0.1:1080", args)
+
+    def test_browser_extension_paths_parse_configured_directories(self):
+        cfg = Config(browser_extension_dirs=r" D:\opencli\bridge ; C:\tools\reader-ext ")
+
+        self.assertTrue(hasattr(browser_identity, "browser_extension_paths"))
+        paths = browser_identity.browser_extension_paths(cfg)
+
+        self.assertEqual(paths, [r"D:\opencli\bridge", r"C:\tools\reader-ext"])
 
     def test_mask_secret_url_hides_proxy_password(self):
         masked = mask_secret_url("socks5://reader:secret@example.proxy:1080")
@@ -74,6 +83,7 @@ class BrowserIdentityTests(unittest.TestCase):
             cfg = Config(
                 chrome_profile_dir=str(profile),
                 browser_proxy_url="socks5://reader:secret@example.proxy:1080",
+                browser_extension_dirs=str(Path(tmp) / "opencli-extension"),
             )
             downloader = PublisherBatchDownloader(
                 cfg,
@@ -90,8 +100,12 @@ class BrowserIdentityTests(unittest.TestCase):
         self.assertEqual(context, "context")
         self.assertEqual(captured["user_data_dir"], str(profile))
         self.assertIn("--proxy-server=socks5://reader:secret@example.proxy:1080", captured["args"])
+        self.assertEqual(captured["extension_paths"], [str(Path(tmp) / "opencli-extension")])
         self.assertEqual(manifest["institution"], "Example University")
+        self.assertEqual(manifest["browser_extension_count"], 1)
+        self.assertEqual(len(manifest["browser_extension_hash"]), 64)
         self.assertEqual(manifest["publishers"], ["elsevier"])
+        self.assertNotIn("opencli-extension", json.dumps(manifest))
         self.assertNotIn("secret", json.dumps(manifest))
 
 

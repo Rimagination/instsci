@@ -430,7 +430,12 @@ class PublisherBatchDownloader:
         return target
 
     def _launch_context(self, profile_dir: str | Path | None = None):
-        from .browser_identity import browser_launch_args, build_profile_identity, ensure_profile_identity
+        from .browser_identity import (
+            browser_extension_paths,
+            browser_launch_args,
+            build_profile_identity,
+            ensure_profile_identity,
+        )
         from .cloakbrowser_compat import prepare_cloakbrowser_runtime
 
         prepare_cloakbrowser_runtime()
@@ -451,6 +456,7 @@ class PublisherBatchDownloader:
             headless=False,
             humanize=True,
             accept_downloads=True,
+            extension_paths=browser_extension_paths(self.config),
             args=browser_launch_args(self.config),
         )
 

@@ -199,11 +199,14 @@ class WebVPNAuth:
             # Use persistent context to keep the campus session alive across runs.
             prepare_cloakbrowser_runtime()
             from cloakbrowser import launch_persistent_context
+            from .browser_identity import browser_extension_paths
+
             profile_dir = self.config.chrome_profile_dir
             Path(profile_dir).mkdir(parents=True, exist_ok=True)
             self._context = launch_persistent_context(
                 user_data_dir=profile_dir,
                 headless=False, humanize=True,
+                extension_paths=browser_extension_paths(self.config),
                 args=self._browser_launch_args(),
             )
             self._browser = None  # persistent context manages its own browser
@@ -451,7 +454,12 @@ class EZProxyAuth:
             return False
 
         try:
-            from .browser_identity import browser_launch_args, build_profile_identity, ensure_profile_identity
+            from .browser_identity import (
+                browser_extension_paths,
+                browser_launch_args,
+                build_profile_identity,
+                ensure_profile_identity,
+            )
 
             prepare_cloakbrowser_runtime()
             from cloakbrowser import launch_persistent_context
@@ -471,6 +479,7 @@ class EZProxyAuth:
                 headless=False,
                 humanize=True,
                 accept_downloads=True,
+                extension_paths=browser_extension_paths(self.config),
                 args=browser_launch_args(self.config),
             )
             self._browser = None
