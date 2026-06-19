@@ -700,6 +700,12 @@ class PublisherBatchDownloader:
                     last_auto_action = marker
                     last_auto_action_at = time.time()
                     continue
+                if self._click_safe_page_action(page, result, purpose="login", run_dir=run_dir):
+                    time.sleep(2)
+                    self._select_institution(page, result)
+                    last_auto_action = marker
+                    last_auto_action_at = time.time()
+                    continue
                 self._select_institution(page, result)
                 last_auto_action = marker
                 last_auto_action_at = time.time()
@@ -1789,6 +1795,239 @@ class PublisherBatchDownloader:
             except Exception:
                 continue
 
+    def _click_safe_page_action(
+        self,
+        page: Any,
+        result: DownloadResult | None = None,
+        *,
+        purpose: str = "any",
+        run_dir: Path | None = None,
+    ) -> bool:
+        """Click one low-risk public page control while avoiding credentials and payment flows."""
+        if self._is_human_login_page(page) or self._is_challenge_page(page):
+            return False
+        try:
+            detail = page.evaluate(
+                """
+                (options) => {
+                  const purpose = (options && options.purpose) || 'any';
+                  const visible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                  };
+                  const norm = (value) => (value || '').toString().replace(/\\s+/g, ' ').trim();
+                  const lower = (value) => norm(value).toLowerCase();
+                  const textOf = (el) => norm(
+                    el.innerText
+                      || el.textContent
+                      || el.value
+                      || el.getAttribute('aria-label')
+                      || el.getAttribute('title')
+                      || ''
+                  );
+                  const metaOf = (el) => norm([el.getAttribute('name') || '', el.id || '', el.className || ''].join(' '));
+                  const hrefOf = (el) => {
+                    const raw = el.href || el.getAttribute('href') || el.getAttribute('formaction') || '';
+                    if (!raw) return '';
+                    try { return new URL(raw, location.href).href; } catch { return raw; }
+                  };
+                  const credentialInput = [...document.querySelectorAll('input,textarea')]
+                    .filter(visible)
+                    .some((el) => {
+                      const haystack = lower([
+                        el.type || '',
+                        el.name || '',
+                        el.id || '',
+                        el.autocomplete || '',
+                        el.placeholder || '',
+                        el.getAttribute('aria-label') || ''
+                      ].join(' '));
+                      return haystack.includes('password')
+                        || haystack.includes('passcode')
+                        || haystack.includes('otp')
+                        || haystack.includes('one-time')
+                        || haystack.includes('verification code')
+                        || haystack.includes('authenticator');
+                    });
+                  if (credentialInput) return null;
+
+                  const bodyText = lower(document.body ? document.body.innerText || document.body.textContent || '' : '');
+                  const challengePagePatterns = [
+                    'captcha',
+                    'recaptcha',
+                    'turnstile',
+                    'verify you are human',
+                    'are you a robot',
+                    'not a robot',
+                    'security verification',
+                    'checking your browser'
+                  ];
+                  if (challengePagePatterns.some((pattern) => bodyText.includes(pattern))) return null;
+
+                  const denyPatterns = [
+                    'buy',
+                    'purchase',
+                    'rent',
+                    'subscribe',
+                    'payment',
+                    'credit card',
+                    'add to cart',
+                    'cart',
+                    'personal account',
+                    'individual account',
+                    'create account',
+                    'register',
+                    'sign up',
+                    'password',
+                    'passcode',
+                    'otp',
+                    'one-time',
+                    'verification code',
+                    'captcha',
+                    'robot'
+                  ];
+                  const controls = [...document.querySelectorAll('a,button,[role="button"],input[type="button"],input[type="submit"]')]
+                    .filter(visible)
+                    .map((el) => {
+                      const text = textOf(el);
+                      const href = hrefOf(el);
+                      const haystack = lower(`${text} ${href} ${metaOf(el)}`);
+                      if (!haystack) return null;
+                      if (denyPatterns.some((pattern) => haystack.includes(pattern))) return null;
+                      let score = 0;
+                      let reason = '';
+                      const exactText = lower(text);
+
+                      if (purpose === 'login' || purpose === 'any') {
+                        const institutionPatterns = [
+                          'access through your institution',
+                          'access through institution',
+                          'access through your organization',
+                          'institutional access',
+                          'institutional sign in',
+                          'institutional login',
+                          'log in via your institution',
+                          'login via your institution',
+                          'log in through your institution',
+                          'sign in with your institution',
+                          'openathens',
+                          'shibboleth',
+                          'find your organization',
+                          'go to sign-in',
+                          'go to sign in',
+                          'go to signin'
+                        ];
+                        for (const pattern of institutionPatterns) {
+                          if (haystack.includes(pattern)) {
+                            score = Math.max(score, 120);
+                            reason = pattern;
+                          }
+                        }
+                      }
+
+                      if (purpose === 'pdf' || purpose === 'any') {
+                        const pdfPatterns = ['continue to pdf', 'go to pdf', 'view pdf', 'open pdf', 'download pdf'];
+                        for (const pattern of pdfPatterns) {
+                          if (haystack.includes(pattern)) {
+                            score = Math.max(score, 140);
+                            reason = pattern;
+                          }
+                        }
+                        if (exactText === 'pdf') {
+                          score = Math.max(score, 90);
+                          reason = 'pdf';
+                        }
+                      }
+
+                      const continuePatterns = [
+                        'submit and continue',
+                        'continue to site',
+                        'continue to article',
+                        'continue to full text',
+                        'continue',
+                        'proceed',
+                        'yes',
+                        'allow'
+                      ];
+                      for (const pattern of continuePatterns) {
+                        if (exactText === pattern || haystack.includes(pattern)) {
+                          if (!haystack.includes('continue reading') && !haystack.includes('continue shopping')) {
+                            const nextScore = pattern === 'continue' ? 45 : 70;
+                            if (nextScore > score) {
+                              score = nextScore;
+                              reason = pattern;
+                            }
+                          }
+                        }
+                      }
+
+                      if (score <= 0) return null;
+                      const rect = el.getBoundingClientRect();
+                      if (rect.top < window.innerHeight * 0.85) score += 5;
+                      if (el.tagName === 'A' || el.tagName === 'BUTTON') score += 5;
+                      return {el, text, href, reason, score, rect};
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => b.score - a.score || a.rect.top - b.rect.top);
+                  const target = controls[0];
+                  if (!target) return null;
+                  target.el.scrollIntoView({block: 'center', inline: 'center'});
+                  target.el.removeAttribute('target');
+                  target.el.click();
+                  return {
+                    selector: 'safe-page-action',
+                    text: target.text.slice(0, 220),
+                    href: target.href.slice(0, 500),
+                    reason: target.reason,
+                    score: Math.round(target.score)
+                  };
+                }
+                """,
+                {"purpose": purpose},
+            )
+            if isinstance(detail, dict) and detail:
+                if result is not None:
+                    self._event(result, "safe_page_action_clicked", json.dumps(detail, ensure_ascii=False))
+                    self._write_safe_action_checkpoint(page, result, run_dir or self._active_run_dir, detail)
+                return True
+        except Exception as exc:
+            if result is not None:
+                self._event(result, "safe_page_action_error", f"{type(exc).__name__}: {exc}")
+        return False
+
+    def _write_safe_action_checkpoint(
+        self,
+        page: Any,
+        result: DownloadResult,
+        run_dir: Path | None,
+        detail: dict[str, Any],
+    ) -> None:
+        if run_dir is None:
+            return
+        try:
+            diag_dir = run_dir / "diagnostics" / safe_name(result.doi)
+            diag_dir.mkdir(parents=True, exist_ok=True)
+            sequence = sum(1 for event in result.events if event.get("state") == "safe_page_action_clicked")
+            stem = f"safe_action_{sequence:03d}"
+            screenshot_path = diag_dir / f"{stem}.png"
+            packet_path = diag_dir / f"{stem}.json"
+            try:
+                page.screenshot(path=str(screenshot_path), full_page=True)
+            except Exception:
+                screenshot_path = Path("")
+            packet = {
+                "doi": result.doi,
+                "publisher": self.profile.name,
+                "url": str(getattr(page, "url", "") or ""),
+                "title": self._title(page),
+                "action": detail,
+                "screenshot_path": str(screenshot_path) if screenshot_path else "",
+            }
+            packet_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            return
+
     def _capture_pdf(self, page: Any, doi: str, result: DownloadResult) -> tuple[bytes | None, str]:
         captured: dict[str, Any] = {"bytes": None, "url": "", "deferred_url": ""}
 
@@ -1825,6 +2064,13 @@ class PublisherBatchDownloader:
                     self._complete_login_from_current_page(page, result)
                     self._return_to_record_article_if_needed(page, result, doi)
             if self._click_pdf_entry(page, result, doi=doi):
+                time.sleep(5)
+                if not captured["bytes"]:
+                    body, final_url = self._fetch_page_state_pdf(page, doi=doi)
+                    if body:
+                        captured["bytes"] = body
+                        captured["url"] = final_url
+            elif self._click_safe_page_action(page, result, purpose="pdf"):
                 time.sleep(5)
                 if not captured["bytes"]:
                     body, final_url = self._fetch_page_state_pdf(page, doi=doi)

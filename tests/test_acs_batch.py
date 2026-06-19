@@ -1568,6 +1568,61 @@ class ACSBatchTests(unittest.TestCase):
         self.assertEqual(page.clicked, [])
         self.assertEqual(result.events, [])
 
+    def test_safe_page_action_clicks_public_continue_or_pdf_control(self):
+        class FakePage:
+            url = "https://publisher.example/article"
+
+            def __init__(self):
+                self.options = None
+
+            def evaluate(self, script, options=None):
+                self.options = options
+                self.script = script
+                if "denyPatterns" not in script or "credentialInput" not in script:
+                    raise AssertionError("safe action script must include deny and credential guards")
+                return {
+                    "selector": "safe-page-action",
+                    "text": "Continue to PDF",
+                    "href": "https://publisher.example/pdf",
+                    "score": 140,
+                }
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=get_publisher_profile("ieee"))
+        result = DownloadResult(doi="10.1109/example", status="failed")
+        page = FakePage()
+
+        self.assertTrue(downloader._click_safe_page_action(page, result, purpose="pdf"))
+        self.assertEqual(page.options["purpose"], "pdf")
+        self.assertEqual(result.events[-1]["state"], "safe_page_action_clicked")
+        self.assertIn("Continue to PDF", result.events[-1]["detail"])
+
+    def test_safe_page_action_does_not_click_sensitive_or_payment_prompt(self):
+        class FakePage:
+            url = "https://publisher.example/login"
+
+            def evaluate(self, _script, _options=None):
+                return None
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=get_publisher_profile("ieee"))
+        result = DownloadResult(doi="10.1109/example", status="failed")
+
+        self.assertFalse(downloader._click_safe_page_action(FakePage(), result, purpose="login"))
+        self.assertEqual(result.events, [])
+
     def test_iop_access_wall_uses_signin_deeplink(self):
         class FakeBody:
             def inner_text(self, **_kwargs):
