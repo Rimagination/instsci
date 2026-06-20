@@ -54,6 +54,14 @@ class PublicLanguageTests(unittest.TestCase):
         self.assertIn("--publisher", result.output)
         self.assertIn("--institution", result.output)
 
+    def test_elsevier_setup_help_describes_global_config(self):
+        result = self.runner.invoke(app, ["elsevier-setup", "--help"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("global", result.output.lower())
+        self.assertIn("--test-doi", result.output)
+        self.assertIn("does not bind", result.output)
+
     def test_publisher_doctor_help_exposes_reusable_verification_asset(self):
         result = self.runner.invoke(app, ["publisher-doctor", "--help"])
 
@@ -151,6 +159,26 @@ class PublicLanguageTests(unittest.TestCase):
         self.assertIn("uv tool install git+https://github.com/Rimagination/instsci.git", text)
         self.assertNotIn("pipx install instsci", text)
         self.assertNotIn("uv tool install instsci", text)
+
+    def test_readme_guides_elsevier_global_setup_without_requiring_inst_token(self):
+        text = Path("README.md").read_text(encoding="utf-8")
+
+        self.assertIn("project-wide global setting", text)
+        self.assertIn("项目级全局配置", text)
+        self.assertIn("Inst Token is optional", text)
+        self.assertIn("Inst Token 不是必需", text)
+        self.assertIn("view=FULL XML", text)
+        self.assertIn("object/eid", text)
+
+    def test_inst_sci_skill_guides_elsevier_global_setup_without_requiring_inst_token(self):
+        text = Path("skills/instsci/SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("Elsevier API", text)
+        self.assertIn("global", text.lower())
+        self.assertIn("Inst Token is optional", text)
+        self.assertIn("view=FULL XML", text)
+        self.assertIn("object/eid", text)
+        self.assertIn("direct-first", text)
 
     def test_inst_sci_module_entrypoint_is_available(self):
         result = subprocess.run(

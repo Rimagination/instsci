@@ -79,6 +79,14 @@ def _access_url(cfg: Config) -> str:
     return cfg.ezproxy_base_url or cfg.webvpn_base_url
 
 
+def _mask_secret(value: str) -> str:
+    if not value:
+        return "(not set)"
+    if len(value) <= 8:
+        return "****"
+    return f"{value[:4]}...{value[-4:]}"
+
+
 def _configured_subscription_institution(cfg: Config) -> str:
     """Return the configured subscription institution search text, if any."""
     return (cfg.carsi_idp_name or cfg.school or "").strip()
@@ -1246,11 +1254,16 @@ def carsi_login(
 
 @app.command()
 def elsevier_setup(
-    api_key: str = typer.Option("", "--api-key", help="Elsevier API key (32-char hex)."),
-    inst_token: str = typer.Option("", "--inst-token", help="Elsevier institutional token."),
-    validate: bool = typer.Option(False, "--validate", help="Validate an existing API key."),
+    api_key: str = typer.Option("", "--api-key", help="Global Elsevier API key saved in the InstSci config."),
+    inst_token: str = typer.Option("", "--inst-token", help="Global Elsevier institutional token, if your library provides one."),
+    validate: bool = typer.Option(False, "--validate", help="Validate the saved global Elsevier API configuration."),
+    test_doi: str = typer.Option(
+        "10.1016/j.watres.2024.121507",
+        "--test-doi",
+        help="Validation-only Elsevier DOI. This does not bind the config to one article.",
+    ),
 ):
-    """Set up Elsevier API key for direct PDF download.
+    """Save the global Elsevier API config for ScienceDirect XML/object-eid PDF download.
 
     Get a free key at: https://dev.elsevier.com/
     """
@@ -1259,71 +1272,83 @@ def elsevier_setup(
     if api_key:
         cfg.elsevier_api_key = api_key
         cfg.save()
-        console.print("[green]Elsevier API key saved.[/green]")
+        console.print("[green]Global Elsevier API key saved.[/green]")
 
     if inst_token:
         cfg.elsevier_inst_token = inst_token
         cfg.save()
-        console.print("[green]Elsevier institutional token saved.[/green]")
+        console.print("[green]Global Elsevier institutional token saved.[/green]")
 
     key = cfg.elsevier_api_key
     if not key:
         console.print("[yellow]No Elsevier API key configured.[/yellow]")
         console.print()
-        console.print("To get a free API key:")
+        console.print("Configure the project-wide Elsevier API key before testing ScienceDirect API retrieval:")
         console.print("  1. Go to [cyan]https://dev.elsevier.com/[/cyan]")
-        console.print("  2. Register and create an API key")
-        console.print("  3. Run: [cyan]instsci elsevier-setup --api-key YOUR_KEY[/cyan]")
+        console.print("  2. Register or sign in")
+        console.print("  3. My API Key / API Key Settings -> create an API key")
+        console.print("  4. If prompted, choose ScienceDirect / Article Retrieval permissions")
+        console.print("  5. Run once: [cyan]instsci elsevier-setup --api-key YOUR_KEY --validate[/cyan]")
         console.print()
-        console.print("With an institutional token, you get full-text PDF access:")
+        console.print("Institutional token is optional and should be configured only if your library provides it:")
         console.print("  [cyan]instsci elsevier-setup --api-key KEY --inst-token TOKEN[/cyan]")
-        raise typer.Exit(0)
+        raise typer.Exit(1 if validate else 0)
 
     if validate:
-        console.print("Validating Elsevier API key...")
-        import requests
-        try:
-            resp = requests.get(
-                "https://api.elsevier.com/content/serial/title",
-                headers={"X-ELS-APIKey": key, "Accept": "application/json"},
-                params={"issn": "0043-1354"},  # Water Research
-                timeout=15,
-            )
-            if resp.status_code == 200:
-                console.print("[green]API key is valid![/green]")
-                data = resp.json()
-                titles = data.get("search-results", {}).get("entry", [])
-                if titles:
-                    console.print(f"  Test query returned: {titles[0].get('dc:title', 'N/A')[:60]}")
-            elif resp.status_code == 401:
-                console.print("[red]API key is invalid (HTTP 401).[/red]")
-            else:
-                console.print(f"[yellow]Unexpected response: HTTP {resp.status_code}[/yellow]")
-        except Exception as e:
-            console.print(f"[red]Validation failed: {e}[/red]")
+        from .sources import elsevier_api
 
-        # Check PDF access
-        console.print()
-        console.print("Testing PDF access...")
-        try:
-            resp = requests.get(
-                "https://api.elsevier.com/content/article/doi/10.1016/j.watres.2024.121507",
-                headers={"X-ELS-APIKey": key, "Accept": "application/pdf"},
-                timeout=30,
+        console.print("[bold]Validating global Elsevier XML/object-eid PDF retrieval...[/bold]")
+        if cfg.proxy_url:
+            console.print("[dim]Route order: direct first, configured connector fallback.[/dim]")
+        else:
+            console.print("[dim]Route order: direct route.[/dim]")
+        console.print(f"[dim]Validation DOI only: {test_doi}[/dim]")
+
+        data = elsevier_api.fetch_fulltext(
+            test_doi,
+            api_key=key,
+            inst_token=cfg.elsevier_inst_token,
+            proxy_url=cfg.proxy_url,
+        )
+        if not data:
+            console.print("[red]XML retrieval failed.[/red]")
+            console.print(
+                "[yellow]Check that the API key is valid and that api.elsevier.com "
+                "uses your campus, library VPN, rule VPN, or institutional exit.[/yellow]"
             )
-            ct = resp.headers.get("content-type", "")
-            if resp.status_code == 200 and "pdf" in ct:
-                console.print(f"[green]PDF access: YES ({len(resp.content)} bytes)[/green]")
-            elif resp.status_code == 200:
-                console.print(f"[yellow]PDF access: NO (got {ct[:40]}, need institutional token)[/yellow]")
-            else:
-                console.print(f"[yellow]PDF access: HTTP {resp.status_code}[/yellow]")
-        except Exception as e:
-            console.print(f"[red]PDF test failed: {e}[/red]")
+            raise typer.Exit(2)
+
+        eids = data.get("pdf_eids", [])
+        route = data.get("api_route", "")
+        console.print(f"[green]XML retrieval: OK[/green] route={route or 'unknown'}")
+        console.print(f"  Title: {data.get('title') or '(unknown)'}")
+        console.print(f"  MAIN PDF object EIDs: {len(eids)}")
+        if not eids:
+            console.print("[red]No MAIN PDF object EID found in XML.[/red]")
+            raise typer.Exit(2)
+
+        pdf = elsevier_api.fetch_pdf(
+            test_doi,
+            api_key=key,
+            inst_token=cfg.elsevier_inst_token,
+            proxy_url=cfg.proxy_url,
+            pdf_eids=eids,
+            preferred_route=route,
+        )
+        if not pdf:
+            console.print("[red]Object PDF retrieval failed.[/red]")
+            console.print(
+                "[yellow]If XML worked but object/eid failed, the current route is usually "
+                "not entitled for this closed-access PDF. Prefer direct campus/rule VPN "
+                "routing before configured connector fallback.[/yellow]"
+            )
+            raise typer.Exit(2)
+
+        console.print(f"[green]Object PDF retrieval: OK ({len(pdf)} bytes)[/green]")
 
     console.print()
-    console.print(f"  API Key:        {key[:8]}...{key[-4:]}" if len(key) > 12 else f"  API Key:        {key}")
-    console.print(f"  Inst Token:     {cfg.elsevier_inst_token or '(not set)'}")
+    console.print(f"  API Key:        {_mask_secret(key)}")
+    console.print(f"  Inst Token:     {'****' if cfg.elsevier_inst_token else '(not set)'}")
 
 
 if __name__ == "__main__":

@@ -188,6 +188,30 @@ class FetcherResultTests(unittest.TestCase):
         self.assertIn("instsci search", result.next_action.command)
         self.assertEqual(result.attempts[-1], {"stage": "doi_resolve", "status": "miss", "reason": "no_url"})
 
+    def test_fetch_with_result_requires_elsevier_api_setup_first(self):
+        with TemporaryDirectory() as tmp:
+            fetcher = PaperFetcher(_config(Path(tmp), school=""))
+            self.addCleanup(fetcher.close)
+            doi = "10.1016/j.watres.2024.121507"
+            metadata = Paper(doi=doi, title="Metadata only")
+
+            with (
+                patch.object(fetcher, "_try_open_access", return_value=metadata),
+                patch.object(fetcher, "_resolve_doi", return_value=None),
+            ):
+                result = fetcher.fetch_with_result(doi, use_cache=False)
+
+        self.assertEqual(result.status, "config_needed")
+        self.assertEqual(result.reason, "elsevier_api_key_missing")
+        self.assertIsNotNone(result.next_action)
+        assert result.next_action is not None
+        self.assertEqual(result.next_action.kind, "configure_elsevier_api")
+        self.assertIn("instsci elsevier-setup --api-key", result.next_action.command)
+        self.assertIn(
+            {"stage": "elsevier_api", "status": "error", "reason": "api_key_missing", "detail": "global config: instsci elsevier-setup --api-key YOUR_KEY --validate"},
+            result.attempts,
+        )
+
     def test_fetch_with_result_records_pdf_only_attempt_when_pdf_text_extraction_fails(self):
         with TemporaryDirectory() as tmp:
             fetcher = PaperFetcher(_config(Path(tmp), school="Configured University"))

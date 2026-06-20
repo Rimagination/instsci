@@ -72,6 +72,24 @@ def _paper_quality(paper: Paper) -> str:
 
 def _apply_attempt_diagnostics(result: FetchResult, identifier: str) -> None:
     """Refine the final next action using provider-level failure provenance."""
+    if result.status != "success" and any(
+        attempt.get("stage") == "elsevier_api"
+        and attempt.get("status") == "error"
+        and attempt.get("reason") == "api_key_missing"
+        for attempt in result.attempts
+    ):
+        result.status = "config_needed"
+        result.reason = "elsevier_api_key_missing"
+        result.next_action = NextAction(
+            kind="configure_elsevier_api",
+            command="instsci elsevier-setup --api-key YOUR_KEY --validate",
+            message=(
+                "Configure the global Elsevier API key once, then validate that "
+                "the XML/object-eid route can retrieve a full PDF."
+            ),
+        )
+        return
+
     for attempt in result.attempts:
         if (
             attempt.get("stage") == "doi_resolve"
@@ -177,7 +195,15 @@ class PaperFetcher:
         # Step 2: Try clean publisher APIs before any institutional/browser flow.
         if doi and not paper.pdf_path:
             api_paper = self._try_elsevier_api(doi, paper)
-            _record_paper_attempt("elsevier_api", api_paper)
+            if api_paper is None and self._elsevier_api_key_missing(doi):
+                _record_attempt(
+                    "elsevier_api",
+                    "error",
+                    reason="api_key_missing",
+                    detail="global config: instsci elsevier-setup --api-key YOUR_KEY --validate",
+                )
+            else:
+                _record_paper_attempt("elsevier_api", api_paper)
             if api_paper and len(api_paper.full_text or "") >= MIN_FULLTEXT_LEN:
                 self._save_cache(api_paper)
                 return api_paper
@@ -315,6 +341,14 @@ class PaperFetcher:
             or self.config.proxy_url
             or (self.config.carsi_enabled and self.config.carsi_idp_name)
         )
+
+    def _elsevier_api_key_missing(self, doi: str) -> bool:
+        """Return whether an Elsevier DOI needs API setup before API retrieval."""
+        if not doi.startswith("10.1016/"):
+            return False
+        from .sources import elsevier_api
+
+        return not bool(elsevier_api.get_api_key(self.config.elsevier_api_key))
 
     def _try_open_access(self, doi: str) -> Paper | None:
         """Try to fetch paper from Open Access sources.
@@ -699,8 +733,8 @@ class PaperFetcher:
         """Fetch paper via Elsevier API (scansci-pdf pattern).
 
         Two strategies:
-        1. XML full-text: extracts article body text (~40K chars) without PDF
-        2. PDF download: gets PDF binary (may be preview-only without inst_token)
+        1. XML full-text with view=FULL: extracts article body text and MAIN PDF EIDs
+        2. Content Object API PDF: downloads the MAIN PDF via object/eid
 
         Both bypass ScienceDirect website and its anti-bot detection.
         """
@@ -708,7 +742,7 @@ class PaperFetcher:
 
         api_key = elsevier_api.get_api_key(self.config.elsevier_api_key)
         if not api_key:
-            logger.debug("No Elsevier API key configured")
+            logger.info("Elsevier API key is not configured; run instsci elsevier-setup first")
             return None
 
         # Only for Elsevier DOIs
@@ -717,12 +751,36 @@ class PaperFetcher:
 
         logger.info("Trying Elsevier API for %s", doi)
 
-        # Strategy 1: Try XML full text extraction (gives complete article body)
+        # Strategy 1: Try XML full text extraction and MAIN PDF EID discovery.
         data = elsevier_api.fetch_fulltext(
             doi,
             api_key=api_key,
             inst_token=self.config.elsevier_inst_token,
+            proxy_url=self.config.proxy_url,
         )
+
+        # Strategy 2: Try object/eid PDF download, preferring the route that got XML.
+        pdf_bytes = elsevier_api.fetch_pdf(
+            doi,
+            api_key=api_key,
+            inst_token=self.config.elsevier_inst_token,
+            proxy_url=self.config.proxy_url,
+            pdf_eids=data.get("pdf_eids") if data else None,
+            preferred_route=data.get("api_route", "") if data else "",
+        )
+        if pdf_bytes:
+            paper.title = (data or {}).get("title", "") or paper.title
+            paper.authors = (data or {}).get("authors", []) or paper.authors
+            paper.abstract = (data or {}).get("abstract", "") or paper.abstract
+            paper.full_text = pdf_extractor.extract_from_bytes(pdf_bytes)
+            if len(paper.full_text or "") < MIN_FULLTEXT_LEN and data and data.get("full_text"):
+                paper.full_text = data["full_text"]
+            pdf_path = self._save_pdf(doi, pdf_bytes)
+            paper.pdf_path = str(pdf_path) if pdf_path else ""
+            paper.source = "elsevier_api"
+            logger.info("Elsevier API PDF: %d bytes", len(pdf_bytes))
+            return paper
+
         if data and data.get("full_text"):
             result = Paper(
                 doi=doi,
@@ -735,20 +793,6 @@ class PaperFetcher:
             )
             logger.info("Elsevier API XML: %d chars of full text", len(data["full_text"]))
             return result
-
-        # Strategy 2: Try PDF download
-        pdf_bytes = elsevier_api.fetch_pdf(
-            doi,
-            api_key=api_key,
-            inst_token=self.config.elsevier_inst_token,
-        )
-        if pdf_bytes:
-            paper.full_text = pdf_extractor.extract_from_bytes(pdf_bytes)
-            pdf_path = self._save_pdf(doi, pdf_bytes)
-            paper.pdf_path = str(pdf_path) if pdf_path else ""
-            paper.source = "elsevier_api"
-            logger.info("Elsevier API PDF: %d bytes", len(pdf_bytes))
-            return paper
 
         return None
 

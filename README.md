@@ -53,8 +53,11 @@ CloakBrowser 浏览器由 InstSci 缓存在项目内的 `instsci/_browsers/cloak
 
 ### 快速开始
 
+Elsevier API key 是项目级全局配置，配置一次后会用于后续所有 ScienceDirect DOI；`--validate` 只用样例 DOI 做下载验证。Inst Token 不是必需的，只有图书馆明确提供 Elsevier institutional token 时才需要配置。Elsevier 下载优先走 `view=FULL XML -> object/eid -> PDF`，并先用 direct route 让 `api.elsevier.com` 走校园网、学校 VPN、规则 VPN 或图书馆出口。
+
 ```bash
 instsci setup --school "你的学校或机构"
+instsci elsevier-setup --api-key YOUR_ELSEVIER_KEY --validate
 instsci search "perovskite solar cells" --limit 10
 instsci fetch "10.1038/s41586-020-2649-2"
 instsci papers dois.txt --publisher auto --output ./runs/papers
@@ -118,8 +121,11 @@ InstSci caches the CloakBrowser binary inside `instsci/_browsers/cloakbrowser`; 
 
 ### Quick Start
 
+The Elsevier API key is a project-wide global setting. Configure it once for later ScienceDirect DOI retrieval; `--validate` only uses a sample DOI as a download smoke test. Inst Token is optional and should be set only when your library explicitly provides an Elsevier institutional token. Elsevier downloads prefer `view=FULL XML -> object/eid -> PDF`, using the direct route first so `api.elsevier.com` can use your campus, school VPN, rule VPN, or library exit.
+
 ```bash
 instsci setup --school "Your Institution"
+instsci elsevier-setup --api-key YOUR_ELSEVIER_KEY --validate
 instsci search "perovskite solar cells" --limit 10
 instsci fetch "10.1038/s41586-020-2649-2"
 instsci papers dois.txt --publisher auto --output ./runs/papers

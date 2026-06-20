@@ -28,12 +28,12 @@ instsci config-cmd --access-url https://your-school-access.example.edu.cn
 
 ## 4. Elsevier / ScienceDirect 获取失败怎么办？
 
-Elsevier 对自动化访问比较严格。InstSci 会优先尝试开放版本和 Elsevier API；如果仍无法获取，可以在浏览器中完成机构登录后重试。
+Elsevier 对自动化访问比较严格。InstSci 会优先尝试开放版本和 Elsevier API；如果仍无法获取，可以在浏览器中完成机构登录后重试。ScienceDirect 建议先配置并验证 Elsevier API，因为稳定路线是 `view=FULL` XML -> MAIN PDF `attachment-eid/object-eid` -> Content Object API，不是直接请求网页 PDF。
 
-推荐先配置 Elsevier API：
+先配置项目级全局 Elsevier API Key，并让 InstSci 做一次真实下载验证。这个 key 会保存到本机 InstSci 配置中，后续所有 Elsevier / ScienceDirect DOI 都会复用；验证 DOI 只是 smoke test，不会把配置绑定到某一篇文章。
 
 ```bash
-instsci elsevier-setup --api-key YOUR_KEY
+instsci elsevier-setup --api-key YOUR_KEY --validate
 ```
 
 如果你的机构提供 Elsevier institutional token，也可以一并配置：
@@ -41,6 +41,8 @@ instsci elsevier-setup --api-key YOUR_KEY
 ```bash
 instsci elsevier-setup --api-key YOUR_KEY --inst-token YOUR_TOKEN
 ```
+
+闭源全文授权和请求 IP 强相关。验证时 InstSci 会优先走 direct route，让 `api.elsevier.com` 使用校园网、学校 VPN、规则 VPN 或图书馆出口；只有 direct 失败或无授权时，才会尝试已配置的 connector/proxy。
 
 ## 5. 机构访问 session 会过期吗？
 

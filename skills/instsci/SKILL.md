@@ -46,6 +46,21 @@ instsci publisher-batch dois.txt --publisher acs --institution "Institution Name
 
 Code-level work may use `PublisherBatchDownloader`, `ACSCloakBatchDownloader`, or the same visible built-in browser context.
 
+## Elsevier API Setup
+
+For Elsevier or ScienceDirect DOI retrieval, guide the user to configure a global Elsevier API key once:
+
+```powershell
+instsci elsevier-setup --api-key YOUR_ELSEVIER_KEY --validate
+```
+
+- The key is global InstSci config, not per article; `--test-doi` is validation only.
+- Inst Token is optional. Configure `--inst-token` only when the user's library explicitly provides an Elsevier institutional token.
+- The preferred API route is `view=FULL XML -> object/eid -> PDF`.
+- Use direct-first routing so `api.elsevier.com` can use campus, school VPN, rule VPN, or library exit before any configured proxy fallback.
+- Do not write API keys, Inst Tokens, cookies, or entitlement details into docs, logs, skill files, or commits.
+- API success is HTTP preflight/API-route evidence. Final publisher PDF verdicts still require visible CloakBrowser evidence when the task asks for closed-access publisher capability.
+
 ## Institution Route
 
 - Do not default to Tsinghua University or any other school.

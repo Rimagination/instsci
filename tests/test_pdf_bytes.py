@@ -52,7 +52,13 @@ class PdfBytesTests(unittest.TestCase):
         session.get.return_value = response
 
         with patch("instsci.sources.elsevier_api.requests.Session", return_value=session):
-            self.assertIsNone(elsevier_api.fetch_pdf("10.1016/example", "key"))
+            self.assertIsNone(
+                elsevier_api.fetch_pdf(
+                    "10.1016/example",
+                    "key",
+                    pdf_eids=["1-s2.0-S123-main.pdf"],
+                )
+            )
 
 
 if __name__ == "__main__":
