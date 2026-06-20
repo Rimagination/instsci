@@ -126,13 +126,6 @@ ACS_PROFILE = PublisherProfile(
         "input[placeholder*='Organization']",
         "#searchInstitution",
     ),
-    institution_result_selectors=(
-        "button:has-text('Tsinghua University')",
-        "button:has-text('清华大学')",
-        "[role='button']:has-text('Tsinghua')",
-        "li:has-text('Tsinghua')",
-        "li:has-text('清华')",
-    ),
 )
 
 ACM_PROFILE = PublisherProfile(
@@ -336,12 +329,6 @@ ELSEVIER_PROFILE = PublisherProfile(
         "input[type='text']",
         "input",
     ),
-    institution_result_selectors=(
-        "button:has-text('清华大学')",
-        "button:has-text('Tsinghua University')",
-        "[role='button']:has-text('Tsinghua')",
-        "li:has-text('Tsinghua')",
-    ),
 )
 
 IEEE_PROFILE = PublisherProfile(
@@ -374,12 +361,6 @@ IEEE_PROFILE = PublisherProfile(
         "input[aria-label*='Institution']",
         "input.inst-typeahead-input",
         "xpath=(//*[normalize-space()='Search for your Institution']/following::input[1])",
-    ),
-    institution_result_selectors=(
-        "button:has-text('Tsinghua University')",
-        "[role='button']:has-text('Tsinghua University')",
-        "[role='option']:has-text('Tsinghua University')",
-        "li:has-text('Tsinghua University')",
     ),
 )
 
@@ -416,13 +397,6 @@ IOP_PROFILE = PublisherProfile(
         "input[type='search']",
         "input[type='text']",
         "input",
-    ),
-    institution_result_selectors=(
-        "button:has-text('Tsinghua University')",
-        "button:has-text('清华大学')",
-        "[role='button']:has-text('Tsinghua')",
-        "[role='option']:has-text('Tsinghua')",
-        "li:has-text('Tsinghua')",
     ),
 )
 
@@ -533,13 +507,6 @@ WORLD_SCIENTIFIC_PROFILE = PublisherProfile(
         "input[placeholder*='institution']",
         "input[type='text']",
         "input",
-    ),
-    institution_result_selectors=(
-        "button:has-text('Tsinghua University')",
-        "a:has-text('Tsinghua University')",
-        "[role='option']:has-text('Tsinghua')",
-        ".ui-menu-item:has-text('Tsinghua')",
-        "li:has-text('Tsinghua')",
     ),
 )
 

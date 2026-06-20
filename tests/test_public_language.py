@@ -144,6 +144,14 @@ class PublicLanguageTests(unittest.TestCase):
         self.assertEqual(scripts["instsci-mcp"], "instsci.mcp_server:main")
         self.assertNotIn("VPN", pyproject["project"]["description"])
 
+    def test_readme_install_points_to_github_until_pypi_publish(self):
+        text = Path("README.md").read_text(encoding="utf-8")
+
+        self.assertIn("pipx install git+https://github.com/Rimagination/instsci.git", text)
+        self.assertIn("uv tool install git+https://github.com/Rimagination/instsci.git", text)
+        self.assertNotIn("pipx install instsci", text)
+        self.assertNotIn("uv tool install instsci", text)
+
     def test_inst_sci_module_entrypoint_is_available(self):
         result = subprocess.run(
             [sys.executable, "-m", "instsci.cli", "--help"],

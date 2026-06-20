@@ -88,6 +88,26 @@ class FetcherElsevierApiTests(unittest.TestCase):
         self.assertIn("Extracted text", result.full_text)
         self.assertEqual(fetcher.saved_pdf, ("10.1016/example", pdf_bytes))
 
+    def test_save_pdf_rejects_html_payload(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fetcher = PaperFetcher(
+                Config(
+                    school="",
+                    output_dir=str(base / "papers"),
+                    cache_dir=str(base / "cache"),
+                    cookie_path=str(base / "cookies.json"),
+                    chrome_profile_dir=str(base / "chrome-profile"),
+                    carsi_cookie_dir=str(base / "carsi-cookies"),
+                    request_delay_min=0,
+                    request_delay_max=0,
+                )
+            )
+            self.addCleanup(fetcher.close)
+
+            self.assertIsNone(fetcher._save_pdf("10.1016/html", b"<html>" + b"x" * 12000))
+            self.assertEqual(list((base / "papers").glob("*.pdf")), [])
+
     def test_fetch_tries_elsevier_api_before_institutional_pdf_download(self):
         fetcher = RecordingFetcher()
         self.addCleanup(fetcher.close)
@@ -176,6 +196,47 @@ class FetcherElsevierApiTests(unittest.TestCase):
         self.assertEqual(captured["records"][0].doi, paper.doi)
         self.assertEqual(captured["run_kwargs"]["target_verified"], 1)
         self.assertNotIn("legacy_login_force", captured)
+
+    def test_browser_pdf_fallback_rejects_non_pdf_manifest_path(self):
+        fetcher = RecordingFetcher()
+        self.addCleanup(fetcher.close)
+        paper = Paper(
+            doi="10.1016/j.watres.2024.121507",
+            url="https://www.sciencedirect.com/science/article/pii/S0043135424004093",
+        )
+
+        class FakeDownloader:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def run_records(self, records, run_dir, **kwargs):
+                pdf_path = Path(run_dir) / "complete" / "pdfs" / "paper.pdf"
+                pdf_path.parent.mkdir(parents=True, exist_ok=True)
+                pdf_path.write_bytes(b"<html>" + b"x" * 12000)
+                manifest_path = Path(run_dir) / "complete" / "manifest.json"
+                manifest_path.write_text(
+                    json.dumps(
+                        [
+                            {
+                                "doi": paper.doi,
+                                "status": "success",
+                                "pdf_path": str(pdf_path),
+                                "text_length": 1200,
+                                "verified_match": True,
+                            }
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                return {"manifest": str(Path(run_dir) / "complete" / "manifest.csv")}
+
+        with patch("instsci.publisher_batch.PublisherBatchDownloader", FakeDownloader), \
+             patch("instsci.fetcher.pdf_extractor.extract_text") as extract_text:
+            result = fetcher._try_browser_pdf_download(paper.doi, paper.url, paper)
+
+        self.assertIsNone(result)
+        self.assertEqual(paper.pdf_path, "")
+        extract_text.assert_not_called()
 
 
 if __name__ == "__main__":

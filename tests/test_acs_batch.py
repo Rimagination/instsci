@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from instsci.acs_batch import DownloadResult, PaperRecord, fetch_est_records, safe_name
 from instsci.config import Config
+from instsci.institution_identity import institution_result_selectors
 from instsci.publisher_batch import ACSCloakBatchDownloader, MIN_PDF_BYTES, PublisherBatchDownloader
 from instsci.publisher_profiles import (
     ACS_PROFILE,
@@ -565,7 +566,7 @@ class ACSBatchTests(unittest.TestCase):
         self.assertIn("xpath=(//*[normalize-space()='Search for your Institution']/following::input[1])", profile.institution_input_selectors)
         self.assertNotIn("input[type='search']", profile.institution_input_selectors)
         self.assertNotIn("input", profile.institution_input_selectors)
-        self.assertTrue(any("Tsinghua University" in selector for selector in profile.institution_result_selectors))
+        self.assertEqual(profile.institution_result_selectors, ())
 
     def test_wiley_clicks_read_full_text_entry(self):
         class FakePage:
@@ -976,10 +977,7 @@ class ACSBatchTests(unittest.TestCase):
 
     def test_elsevier_profile_can_drive_organization_search(self):
         self.assertTrue(ELSEVIER_PROFILE.institution_input_selectors)
-        self.assertTrue(ELSEVIER_PROFILE.institution_result_selectors)
-        self.assertTrue(
-            any("tsinghua" in selector.lower() for selector in ELSEVIER_PROFILE.institution_result_selectors)
-        )
+        self.assertEqual(ELSEVIER_PROFILE.institution_result_selectors, ())
 
     def test_elsevier_prefers_real_tsinghua_institution_anchor(self):
         class FakePage:
@@ -1081,10 +1079,7 @@ class ACSBatchTests(unittest.TestCase):
 
     def test_world_scientific_profile_can_drive_institution_search(self):
         self.assertTrue(WORLD_SCIENTIFIC_PROFILE.institution_input_selectors)
-        self.assertTrue(WORLD_SCIENTIFIC_PROFILE.institution_result_selectors)
-        self.assertTrue(
-            any("tsinghua" in selector.lower() for selector in WORLD_SCIENTIFIC_PROFILE.institution_result_selectors)
-        )
+        self.assertEqual(WORLD_SCIENTIFIC_PROFILE.institution_result_selectors, ())
 
     def test_world_scientific_picker_is_not_stalled_before_selection(self):
         class FakeBody:
@@ -1166,11 +1161,44 @@ class ACSBatchTests(unittest.TestCase):
         self.assertFalse(downloader._looks_logged_out(FakePage()))
 
     def test_acs_profile_does_not_click_generic_institution_list_items(self):
-        self.assertTrue(ACS_PROFILE.institution_result_selectors)
-        self.assertNotIn("li", ACS_PROFILE.institution_result_selectors)
-        self.assertTrue(
-            any("tsinghua" in selector.lower() or "清华" in selector for selector in ACS_PROFILE.institution_result_selectors)
+        self.assertEqual(ACS_PROFILE.institution_result_selectors, ())
+
+    def test_institution_alias_selectors_are_query_scoped(self):
+        selectors = institution_result_selectors("Example University")
+
+        self.assertIn("button:has-text('Example University')", selectors)
+        self.assertIn("[role='option']:has-text('Example University')", selectors)
+        self.assertFalse(any("Tsinghua" in selector or "清华" in selector for selector in selectors))
+
+    def test_profile_tsinghua_selectors_are_not_used_for_other_institutions(self):
+        profile = PublisherProfile(
+            name="Example",
+            article_url_template="https://example.org/doi/{doi}",
+            pdf_url_templates=(),
+            success_url_markers=("example.org/doi/",),
+            auth_url_markers=(),
+            auth_title_markers=(),
+            sso_text_markers=(),
+            institution_input_selectors=("input",),
+            institution_result_selectors=("button:has-text('Tsinghua')",),
         )
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(
+            cfg,
+            profile=profile,
+            institution_query="Example University",
+        )
+
+        selectors = downloader._institution_result_selectors()
+
+        self.assertTrue(any("Example University" in selector for selector in selectors))
+        self.assertFalse(any("Tsinghua" in selector or "清华" in selector for selector in selectors))
 
     def test_institution_selection_requires_explicit_institution(self):
         class FakeLocator:

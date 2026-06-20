@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -18,11 +19,33 @@ except ImportError:
     _HAS_CLOAKBROWSER = False
 
 from .config import Config
+from .institution_identity import institution_aliases
 from .session_store import CookieStore
 
 logger = logging.getLogger(__name__)
 
 _PUBLISHER_CONFIGS_FILE = Path(__file__).parent / "data" / "publisher_carsi.json"
+
+
+def _institution_result_click_script(result_selector: str, institution: str) -> str:
+    """Build a safe script that clicks only a matching institution result."""
+    selector_js = json.dumps(result_selector)
+    aliases_js = json.dumps(institution_aliases(institution), ensure_ascii=False)
+    return f"""
+        (() => {{
+            const selector = {selector_js};
+            const aliases = {aliases_js};
+            const items = document.querySelectorAll(selector);
+            for (const el of items) {{
+                const text = el.textContent || '';
+                if (aliases.some((alias) => alias && text.includes(alias))) {{
+                    el.click();
+                    return text.trim().substring(0, 60);
+                }}
+            }}
+            return null;
+        }})()
+    """
 
 
 @dataclass
@@ -181,25 +204,10 @@ class CARSIClient:
                     if cfg.result_selector:
                         try:
                             page.wait_for_selector(cfg.result_selector, timeout=5000)
-                            # Try clicking the result that matches the university name
-                            result_text = page.evaluate(f"""
-                                (() => {{
-                                    const items = document.querySelectorAll('{cfg.result_selector}');
-                                    for (const el of items) {{
-                                        const text = el.textContent || '';
-                                        if (text.includes('{self.config.carsi_idp_name}')) {{
-                                            el.click();
-                                            return text.trim().substring(0, 60);
-                                        }}
-                                    }}
-                                    // If no exact match, click the first result
-                                    if (items.length > 0) {{
-                                        items[0].click();
-                                        return items[0].textContent.trim().substring(0, 60);
-                                    }}
-                                    return null;
-                                }})()
-                            """)
+                            # Try clicking only a result that matches the configured institution.
+                            result_text = page.evaluate(
+                                _institution_result_click_script(cfg.result_selector, self.config.carsi_idp_name)
+                            )
                             if result_text:
                                 logger.info("Clicked institution: %s", result_text)
                         except Exception:

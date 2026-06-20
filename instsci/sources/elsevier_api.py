@@ -6,6 +6,8 @@ import xml.etree.ElementTree as ET
 
 import requests
 
+from ..pdf_bytes import describe_non_pdf_bytes, is_plausible_pdf_bytes
+
 logger = logging.getLogger(__name__)
 
 ELSEVIER_API = "https://api.elsevier.com/content"
@@ -58,10 +60,12 @@ def fetch_pdf(doi: str, api_key: str, inst_token: str = "") -> bytes | None:
         return None
 
     content_type = resp.headers.get("content-type", "")
-    is_pdf = "pdf" in content_type or resp.content[:5] == b"%PDF-"
-
-    if not is_pdf:
-        logger.info("Elsevier API returned non-PDF (%s) — key may lack full-text access", content_type[:50])
+    if not is_plausible_pdf_bytes(resp.content):
+        logger.info(
+            "Elsevier API returned non-PDF (%s, %s); key may lack full-text access",
+            content_type[:50],
+            describe_non_pdf_bytes(resp.content),
+        )
         return None
 
     if len(resp.content) < 10000:

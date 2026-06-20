@@ -20,6 +20,11 @@ import requests
 
 from .config import Config
 from .extractors import pdf_extractor
+from .institution_identity import (
+    institution_result_selectors,
+    is_tsinghua_institution,
+)
+from .pdf_bytes import MIN_PDF_BYTES, is_plausible_pdf_bytes
 from .publisher_pdf_router import (
     build_pdf_candidates,
     extract_elsevier_pii,
@@ -29,7 +34,6 @@ from .publisher_pdf_router import (
 from .publisher_profiles import ACS_PROFILE, PublisherProfile
 
 EST_ISSN = "1520-5851"
-MIN_PDF_BYTES = 5_000
 MAX_BROWSER_CONCURRENCY = 4
 PDF_URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 
@@ -1535,23 +1539,13 @@ class PublisherBatchDownloader:
         return False
 
     def _institution_query_is_tsinghua(self) -> bool:
-        query = self.institution_query.lower()
-        return "tsinghua" in query or "qinghua" in query or "清华" in self.institution_query
+        return is_tsinghua_institution(self.institution_query)
 
     def _institution_result_selectors(self) -> tuple[str, ...]:
         query = self.institution_query.strip()
         if not query:
             return ()
-        literal = query.replace("\\", "\\\\").replace("'", "\\'")
-        selectors = [
-            f"text={query}",
-            f"button:has-text('{literal}')",
-            f"a:has-text('{literal}')",
-            f"[role='button']:has-text('{literal}')",
-            f"[role='option']:has-text('{literal}')",
-            f"li:has-text('{literal}')",
-            f"div:has-text('{literal}')",
-        ]
+        selectors = list(institution_result_selectors(query))
         if self._institution_query_is_tsinghua():
             selectors.extend(self.profile.institution_result_selectors)
         return tuple(dict.fromkeys(selectors))
@@ -1729,7 +1723,7 @@ class PublisherBatchDownloader:
                     captured["deferred_url"] = url
                     return
                 body = response.body()
-                if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
+                if is_plausible_pdf_bytes(body):
                     captured["bytes"] = body
                     captured["url"] = url
             except Exception:
@@ -1771,7 +1765,7 @@ class PublisherBatchDownloader:
                             captured["deferred_url"] = response_url
                         else:
                             body = response.body()
-                            if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
+                            if is_plausible_pdf_bytes(body):
                                 captured["bytes"] = body
                                 captured["url"] = response.url
                     if not captured["bytes"]:
@@ -2202,7 +2196,7 @@ class PublisherBatchDownloader:
             download = download_info.value
             path = download.path()
             body = Path(path).read_bytes()
-            if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
+            if is_plausible_pdf_bytes(body):
                 return body, str(getattr(download, "url", "") or pdf_url)
         except Exception as exc:
             self._event(result, "download_capture_error", f"{type(exc).__name__}: {exc}")
@@ -2263,7 +2257,7 @@ class PublisherBatchDownloader:
                 download = download_info.value
                 path = download.path()
                 body = Path(path).read_bytes()
-                if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
+                if is_plausible_pdf_bytes(body):
                     self._event(result, "pdf_viewer_download_captured", json.dumps(detail, ensure_ascii=False))
                     return body, str(getattr(download, "url", "") or getattr(page, "url", "") or "")
             except Exception as exc:
@@ -2293,7 +2287,7 @@ class PublisherBatchDownloader:
             download = download_info.value
             path = download.path()
             body = Path(path).read_bytes()
-            if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
+            if is_plausible_pdf_bytes(body):
                 detail = {"selector": "pdf-viewer-toolbar-download", "x": x, "y": y}
                 self._event(result, "pdf_viewer_toolbar_download_captured", json.dumps(detail, ensure_ascii=False))
                 return body, str(getattr(download, "url", "") or getattr(page, "url", "") or "")
@@ -2390,7 +2384,7 @@ class PublisherBatchDownloader:
                 allow_redirects=True,
             )
             body = resp.content
-            if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
+            if is_plausible_pdf_bytes(body):
                 return body, resp.url
         except Exception:
             return None, url

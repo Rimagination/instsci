@@ -1,12 +1,14 @@
 """arXiv paper fetching."""
 
 import logging
+from pathlib import Path
 import re
 import xml.etree.ElementTree as ET
 
 import requests
 
 from ..http_utils import request_with_retry
+from ..pdf_bytes import describe_non_pdf_bytes, is_plausible_pdf_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -115,14 +117,29 @@ def download_pdf(arxiv_id: str, output_path: str) -> bool:
         True if download succeeded.
     """
     url = get_pdf_url(arxiv_id)
+    output = Path(output_path)
+    tmp_path = output.with_suffix(output.suffix + ".tmp")
     try:
         resp = request_with_retry("GET", url, timeout=60, stream=True)
         resp.raise_for_status()
-        with open(output_path, "wb") as f:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with tmp_path.open("wb") as f:
             for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
+                if chunk:
+                    f.write(chunk)
+        pdf_bytes = tmp_path.read_bytes()
+        if not is_plausible_pdf_bytes(pdf_bytes):
+            logger.warning(
+                "arXiv download for %s was not a PDF: %s",
+                arxiv_id,
+                describe_non_pdf_bytes(pdf_bytes),
+            )
+            tmp_path.unlink(missing_ok=True)
+            return False
+        tmp_path.replace(output)
         logger.info("Downloaded arXiv PDF to %s", output_path)
         return True
     except (requests.RequestException, OSError) as e:
+        tmp_path.unlink(missing_ok=True)
         logger.error("Failed to download arXiv PDF %s: %s", arxiv_id, e)
         return False

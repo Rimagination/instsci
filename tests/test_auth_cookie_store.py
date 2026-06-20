@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from instsci.auth import EZProxyAuth, WebVPNAuth
-from instsci.carsi import CARSIClient
+from instsci.carsi import CARSIClient, _institution_result_click_script
 from instsci.config import Config
 
 
@@ -47,6 +47,19 @@ class AuthCookieStoreTests(unittest.TestCase):
 
             self.assertEqual(len(saved), 1)
             self.assertEqual(saved[0]["expires"], 0)
+
+    def test_carsi_institution_result_script_does_not_click_first_unmatched_item(self):
+        script = _institution_result_click_script("button, a, [role='button']", "Example University")
+
+        self.assertIn("\"button, a, [role='button']\"", script)
+        self.assertIn("Example University", script)
+        self.assertNotIn("items[0].click", script)
+
+    def test_carsi_institution_result_script_uses_tsinghua_aliases(self):
+        script = _institution_result_click_script("button", "清华大学")
+
+        self.assertIn("Tsinghua University(OpenAthens)", script)
+        self.assertIn("清华大学", script)
 
     def test_ezproxy_save_preserves_browser_session_cookie(self):
         with TemporaryDirectory() as tmp:

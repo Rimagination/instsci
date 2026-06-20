@@ -8,12 +8,20 @@ from typer.testing import CliRunner
 
 from instsci.config import Config
 from instsci.cli import app
-from instsci.session_broker import BrokerState, broker_key, write_broker_state
+from instsci.session_broker import BrokerState, broker_key, pid_is_running, write_broker_state
 
 
 class SessionBrokerTests(unittest.TestCase):
     def test_broker_key_normalizes_publisher_name(self):
         self.assertEqual(broker_key("Science Direct"), "science-direct")
+
+    def test_pid_is_running_uses_windows_process_probe_without_signal(self):
+        with patch("instsci.session_broker.sys.platform", "win32"), \
+             patch("instsci.session_broker.os.kill", side_effect=AssertionError("do not signal Windows PIDs")), \
+             patch("instsci.session_broker._pid_is_running_windows", return_value=True) as windows_probe:
+            self.assertTrue(pid_is_running(12345))
+
+        windows_probe.assert_called_once_with(12345)
 
     def test_papers_defaults_to_broker_submission_when_available(self):
         runner = CliRunner()
