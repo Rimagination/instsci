@@ -68,6 +68,28 @@ class PublisherPdfRouterTests(unittest.TestCase):
 
         self.assertIn("https://www.nature.com/articles/s41586-020-2649-2.pdf", candidates)
 
+    def test_springer_discovered_urls_exclude_reference_pdfs(self):
+        candidates = build_pdf_candidates(
+            SPRINGER_PROFILE,
+            "10.1007/s11252-026-02003-6",
+            source_url="https://link.springer.com/article/10.1007/s11252-026-02003-6",
+            discovered_urls=[
+                "https://link.springer.com/content/pdf/10.1007/s11252-026-02003-6.pdf",
+                "https://www.academia.edu/download/47768733/00b7d53a92ec3894f7000000.pdf",
+                "https://dev.itreetools.org/documents/61/iTree_Eco_Precipitation_Interception_Model_Descriptions.pdf",
+            ],
+        )
+
+        self.assertIn("https://link.springer.com/content/pdf/10.1007/s11252-026-02003-6.pdf", candidates)
+        self.assertNotIn(
+            "https://www.academia.edu/download/47768733/00b7d53a92ec3894f7000000.pdf",
+            candidates,
+        )
+        self.assertNotIn(
+            "https://dev.itreetools.org/documents/61/iTree_Eco_Precipitation_Interception_Model_Descriptions.pdf",
+            candidates,
+        )
+
     def test_wiley_prefers_pdfdirect_before_pdf_and_epdf(self):
         candidates = build_pdf_candidates(WILEY_PROFILE, "10.1002/adfm.202525261")
 

@@ -58,6 +58,12 @@ For publisher PDF work, report each publisher or DOI with:
 - Browser-backed UI actions require visual checkpoints. After clicking publisher controls such as `PDF`, `Institutional Access`, `Institutional Sign In`, OpenAthens, or a cookie/verification prompt, agents MUST inspect a screenshot of the visible CloakBrowser window before concluding the click worked or failed. DOM events, URL strings, and logs are supporting evidence, not substitutes for visual confirmation.
 - When reporting results, label HTTP-only findings as `HTTP preflight` and browser-backed findings as `browser verified`.
 
+## Browser Execution Layer Rule
+
+- Before changing browser automation, human-assist handoff, session broker persistence, publisher profiles, attach-only control tools, or download-speed behavior, read `docs/browser-execution-layer.md`.
+- Modern browser-agent tools are useful design references for action modeling, handoff state, session inventory, and reusable workflow skills, but InstSci must internalize those mechanisms in its own visible CloakBrowser workflow.
+- External control tools may observe, screenshot, discover selectors, or perform safe public clicks only after attaching to an InstSci-owned CloakBrowser session. They must not launch a replacement browser, own auth state, close CloakBrowser, enter credentials, solve CAPTCHA, or become the PDF capture/download engine.
+
 ## Institutional Identity / Access Route Rule
 
 - Load `instsci/data/institutional_identity_policy.json` before choosing a closed-access PDF identity route. The CLI view is `instsci identity-policy`.
@@ -68,3 +74,12 @@ For publisher PDF work, report each publisher or DOI with:
 - Do not claim WebVPN cookies are a full reusable login state. `cookies.json` and exported cookie jars are `HTTP preflight` assets only; they do not preserve all browser storage, WebVPN in-memory state, TLS sessions, browser fingerprint/challenge state, or page-generated PDF tokens.
 - If WebVPN is attempted, keep the visible CloakBrowser context alive as a WebVPN broker. Reopening a profile may preserve cookies/localStorage/IndexedDB/cache, but it may still lose non-exportable state such as TLS session tickets and Cloudflare/WAF challenge state.
 - If WebVPN fails to capture the PDF, fall back to the publisher-specific article-page institutional login flow before marking the publisher failed.
+
+## KeePassXC Credential Assist Rule
+
+- KeePassXC Auto-Type is the approved free local credential-assist path when a user wants less manual typing without exposing passwords to InstSci.
+- This flow is institution-neutral. Users create their own KeePassXC entries for their own institution IdP host; do not hard-code Tsinghua University or any other school, and do not store credentials under publisher domains such as ScienceDirect, IEEE, Wiley, or ACS.
+- If the IdP host is unknown, pause at the visible institution login page and use only the address-bar hostname as the configuration clue. Do not write full redirected SSO URLs with transient tokens into docs, logs, tickets, or commits.
+- Agents may install KeePassXC only after explicit user approval and may trigger the configured global Auto-Type hotkey only after the user has confirmed KeePassXC is unlocked and the correct login field is focused.
+- Agents must not automate KeePassXC's password-manager UI, read KeePassXC entries, export passwords, inspect password fields, use clipboard-based credential transfer, or ask users to paste passwords into chat or terminal.
+- Prefer an Auto-Type sequence without automatic submit, such as `{USERNAME}{TAB}{PASSWORD}`, until the user has verified the page. SMS codes, authenticator approvals, TOTP, CAPTCHA, recovery prompts, and final login confirmation remain user actions in the visible CloakBrowser window.

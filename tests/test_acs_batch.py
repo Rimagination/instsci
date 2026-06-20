@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from instsci.acs_batch import DownloadResult, PaperRecord, fetch_est_records, safe_name
 from instsci.config import Config
+from instsci.institution_identity import institution_result_selectors
 from instsci.publisher_batch import ACSCloakBatchDownloader, MIN_PDF_BYTES, PublisherBatchDownloader
 from instsci.publisher_profiles import (
     ACS_PROFILE,
@@ -77,6 +78,22 @@ class ACSBatchTests(unittest.TestCase):
 
         self.assertEqual(ACS_PROFILE.article_url(doi), f"https://pubs.acs.org/doi/{doi}")
         self.assertIn(f"https://pubs.acs.org/doi/pdf/{doi}", ACS_PROFILE.pdf_urls(doi))
+
+    def test_springer_profile_uses_publisher_specific_pdf_routes(self):
+        springer_doi = "10.1007/s11252-026-02003-6"
+        nature_doi = "10.1038/s41586-020-2649-2"
+
+        springer_urls = SPRINGER_PROFILE.pdf_urls(springer_doi)
+        nature_urls = SPRINGER_PROFILE.pdf_urls(nature_doi)
+
+        self.assertEqual(
+            springer_urls,
+            ["https://link.springer.com/content/pdf/10.1007%2Fs11252-026-02003-6.pdf"],
+        )
+        self.assertEqual(
+            nature_urls,
+            ["https://www.nature.com/articles/s41586-020-2649-2.pdf"],
+        )
 
     def test_aps_profile_builds_concrete_article_url(self):
         doi = "10.1103/PhysRevLett.128.161102"
@@ -565,14 +582,14 @@ class ACSBatchTests(unittest.TestCase):
         self.assertIn("xpath=(//*[normalize-space()='Search for your Institution']/following::input[1])", profile.institution_input_selectors)
         self.assertNotIn("input[type='search']", profile.institution_input_selectors)
         self.assertNotIn("input", profile.institution_input_selectors)
-        self.assertTrue(any("Tsinghua University" in selector for selector in profile.institution_result_selectors))
+        self.assertFalse(profile.institution_result_selectors)
 
     def test_science_profile_has_institution_search(self):
         profile = get_publisher_profile("science")
 
         self.assertIn("input[placeholder='Type the name of your institution']", profile.institution_input_selectors)
         self.assertIn("xpath=(//*[normalize-space()='Find your institution']/following::input[1])", profile.institution_input_selectors)
-        self.assertTrue(any("Tsinghua University" in selector for selector in profile.institution_result_selectors))
+        self.assertFalse(profile.institution_result_selectors)
 
     def test_plausible_pdf_bytes_rejects_text_corrupted_binary(self):
         valid = b"%PDF-1.4\n" + (b"x" * MIN_PDF_BYTES) + b"\n%%EOF\n"
@@ -588,7 +605,7 @@ class ACSBatchTests(unittest.TestCase):
 
     def test_wiley_clicks_read_full_text_entry(self):
         class FakePage:
-            def evaluate(self, _script):
+            def evaluate(self, _script, _options=None):
                 return {
                     "selector": "wiley-read-full-text",
                     "text": "Read the full text",
@@ -608,6 +625,33 @@ class ACSBatchTests(unittest.TestCase):
         self.assertTrue(downloader._click_wiley_read_full_text_entry(FakePage(), result))
         self.assertEqual(result.events[-1]["state"], "wiley_read_full_text_clicked")
         self.assertIn("Read the full text", result.events[-1]["detail"])
+
+    def test_wiley_read_full_text_click_receives_current_record_doi(self):
+        class FakePage:
+            def __init__(self):
+                self.script = ""
+                self.options = None
+
+            def evaluate(self, script, options=None):
+                self.script = script
+                self.options = options
+                return None
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        page = FakePage()
+        downloader = PublisherBatchDownloader(cfg, profile=get_publisher_profile("wiley"))
+        result = DownloadResult(doi="10.1002/adfm.202525261", status="failed")
+
+        self.assertFalse(downloader._click_wiley_read_full_text_entry(page, result))
+        self.assertEqual(page.options["doi"], "10.1002/adfm.202525261")
+        self.assertIn("const doi", page.script)
+        self.assertIn("recordHref", page.script)
 
     def test_wiley_clicks_institutional_login_entry(self):
         class FakePage:
@@ -793,6 +837,124 @@ class ACSBatchTests(unittest.TestCase):
         self.assertEqual(page.options, {"doi": "10.1002/ldr.4101"})
         self.assertEqual(result.events[-1]["state"], "pdf_button_clicked")
         self.assertIn("wiley-pdf-entry", result.events[-1]["detail"])
+
+    def test_springer_clicks_only_same_publisher_pdf_entry(self):
+        class FakePage:
+            def __init__(self):
+                self.options = None
+
+            def evaluate(self, script, options=None):
+                self.options = options
+                if "springer-pdf-entry" not in script:
+                    return None
+                return {
+                    "selector": "springer-pdf-entry",
+                    "text": "Download PDF",
+                    "href": "https://link.springer.com/content/pdf/10.1007/s11252-026-02003-6.pdf",
+                    "score": 200,
+                }
+
+            def locator(self, _selector):
+                raise AssertionError("generic PDF selectors should not run for Springer")
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        page = FakePage()
+        downloader = PublisherBatchDownloader(cfg, profile=SPRINGER_PROFILE)
+        result = DownloadResult(doi="10.1007/s11252-026-02003-6", status="failed")
+
+        self.assertTrue(downloader._click_pdf_entry(page, result, doi=result.doi))
+        self.assertEqual(page.options, {"doi": "10.1007/s11252-026-02003-6"})
+        self.assertIn("springer-pdf-entry", result.events[-1]["detail"])
+
+    def test_springer_skips_generic_external_pdf_links(self):
+        class FakePage:
+            def evaluate(self, _script, _options=None):
+                return None
+
+            def locator(self, _selector):
+                raise AssertionError("generic PDF selectors should not inspect external Springer links")
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        page = FakePage()
+        downloader = PublisherBatchDownloader(cfg, profile=SPRINGER_PROFILE)
+        result = DownloadResult(doi="10.1007/s11252-026-02003-6", status="failed")
+
+        self.assertFalse(downloader._click_pdf_entry(page, result, doi=result.doi))
+
+    def test_springer_clicks_institution_login_banner(self):
+        class FakeLocator:
+            def __init__(self, page, selector):
+                self.page = page
+                self.selector = selector
+                self.first = self
+
+            def is_visible(self, **_kwargs):
+                return self.selector == "#test-login-banner-link"
+
+            def inner_text(self, **_kwargs):
+                return "log in via an institution"
+
+            def get_attribute(self, name, **_kwargs):
+                if name == "href":
+                    return "https://wayf.springernature.com?redirect_uri=https%3A%2F%2Flink.springer.com%2Farticle%2F10.1007%2Fs11252-026-02003-6"
+                return ""
+
+            def click(self, **_kwargs):
+                self.page.clicked_selector = self.selector
+
+        class FakePage:
+            url = "https://link.springer.com/article/10.1007/s11252-026-02003-6"
+            clicked_selector = ""
+
+            def locator(self, selector):
+                return FakeLocator(self, selector)
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        page = FakePage()
+        downloader = PublisherBatchDownloader(cfg, profile=SPRINGER_PROFILE)
+        result = DownloadResult(doi="10.1007/s11252-026-02003-6", status="failed")
+
+        self.assertTrue(downloader._click_sso_entry(page, result))
+        self.assertEqual(page.clicked_selector, "#test-login-banner-link")
+        self.assertEqual(result.events[-1]["state"], "sso_entry_clicked")
+
+    def test_springer_preview_subscription_page_requires_login(self):
+        class FakePage:
+            url = "https://link.springer.com/article/10.1007/s11252-026-02003-6"
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=SPRINGER_PROFILE)
+        downloader._title = lambda _page: "Trait-based sensitivity analysis"  # type: ignore[method-assign]
+        downloader._body_text = lambda _page, _limit=5000: (
+            "This is a preview of subscription content, log in via an institution. "
+            "Buy article PDF"
+        )  # type: ignore[method-assign]
+
+        self.assertTrue(downloader._looks_logged_out(FakePage()))
 
     def test_ieee_institution_selection_uses_typeahead_result(self):
         class FakeLocator:
@@ -995,10 +1157,7 @@ class ACSBatchTests(unittest.TestCase):
 
     def test_elsevier_profile_can_drive_organization_search(self):
         self.assertTrue(ELSEVIER_PROFILE.institution_input_selectors)
-        self.assertTrue(ELSEVIER_PROFILE.institution_result_selectors)
-        self.assertTrue(
-            any("tsinghua" in selector.lower() for selector in ELSEVIER_PROFILE.institution_result_selectors)
-        )
+        self.assertFalse(ELSEVIER_PROFILE.institution_result_selectors)
 
     def test_elsevier_prefers_real_tsinghua_institution_anchor(self):
         class FakePage:
@@ -1100,10 +1259,7 @@ class ACSBatchTests(unittest.TestCase):
 
     def test_world_scientific_profile_can_drive_institution_search(self):
         self.assertTrue(WORLD_SCIENTIFIC_PROFILE.institution_input_selectors)
-        self.assertTrue(WORLD_SCIENTIFIC_PROFILE.institution_result_selectors)
-        self.assertTrue(
-            any("tsinghua" in selector.lower() for selector in WORLD_SCIENTIFIC_PROFILE.institution_result_selectors)
-        )
+        self.assertFalse(WORLD_SCIENTIFIC_PROFILE.institution_result_selectors)
 
     def test_world_scientific_picker_is_not_stalled_before_selection(self):
         class FakeBody:
@@ -1185,11 +1341,7 @@ class ACSBatchTests(unittest.TestCase):
         self.assertFalse(downloader._looks_logged_out(FakePage()))
 
     def test_acs_profile_does_not_click_generic_institution_list_items(self):
-        self.assertTrue(ACS_PROFILE.institution_result_selectors)
-        self.assertNotIn("li", ACS_PROFILE.institution_result_selectors)
-        self.assertTrue(
-            any("tsinghua" in selector.lower() or "清华" in selector for selector in ACS_PROFILE.institution_result_selectors)
-        )
+        self.assertFalse(ACS_PROFILE.institution_result_selectors)
 
     def test_institution_selection_requires_explicit_institution(self):
         class FakeLocator:
@@ -1271,6 +1423,14 @@ class ACSBatchTests(unittest.TestCase):
 
         self.assertTrue(any("Example University" in selector for selector in selectors))
         self.assertFalse(any("Tsinghua" in selector for selector in selectors))
+
+    def test_institution_alias_selectors_are_query_scoped(self):
+        selectors = institution_result_selectors("清华大学")
+
+        self.assertIn("text=清华大学", selectors)
+        self.assertIn("text=Tsinghua University", selectors)
+        self.assertIn("text=Tsinghua University (OpenAthens)", selectors)
+        self.assertFalse(any("Tsinghua" in selector for selector in institution_result_selectors("Example University")))
 
     def test_challenge_wait_uses_login_timeout_budget(self):
         class FakeBody:
@@ -1901,6 +2061,27 @@ class ACSBatchTests(unittest.TestCase):
         downloader = PublisherBatchDownloader(cfg, profile=get_publisher_profile("iop"))
         result = DownloadResult(doi="10.1088/example", status="failed")
 
+        downloader._select_institution(FakePage(), result)
+        self.assertEqual(result.events, [])
+
+    def test_select_institution_does_not_fill_microsoft_login_page(self):
+        class FakePage:
+            url = "https://login.microsoftonline.com/example/saml2?RelayState=https%3A%2F%2Flink.springer.com%2Farticle%2F10.1007%2Fexample"
+
+            def locator(self, _selector):
+                raise AssertionError("should not locate inputs on Microsoft institution login page")
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=get_publisher_profile("springer"))
+        result = DownloadResult(doi="10.1007/example", status="failed")
+
+        self.assertTrue(downloader._is_human_login_page(FakePage()))
         downloader._select_institution(FakePage(), result)
         self.assertEqual(result.events, [])
 
@@ -3452,6 +3633,45 @@ class ACSBatchTests(unittest.TestCase):
             self.assertFalse(manifest[0]["verified_match"])
             self.assertTrue(Path(manifest[0]["pdf_path"]).exists())
 
+    def test_complete_manifest_preserves_failed_reason_for_attention(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            cfg = Config(
+                output_dir=str(base / "out"),
+                cache_dir=str(base / "cache"),
+                cookie_path=str(base / "cookies.json"),
+                chrome_profile_dir=str(base / "profile"),
+                carsi_cookie_dir=str(base / "carsi"),
+            )
+            downloader = PublisherBatchDownloader(cfg, profile=WILEY_PROFILE)
+            records = [
+                PaperRecord(doi="10.1111/dmcn.70356", title="Needs login"),
+                PaperRecord(doi="10.1111/dmcn.70357", title="No entitlement"),
+            ]
+            results = [
+                DownloadResult(
+                    doi="10.1111/dmcn.70356",
+                    status="failed",
+                    reason="sso_required",
+                    state="sso_required",
+                ),
+                DownloadResult(
+                    doi="10.1111/dmcn.70357",
+                    status="failed",
+                    reason="institution_pdf_entitlement_missing",
+                    state="institution_pdf_entitlement_missing",
+                ),
+            ]
+
+            summary = downloader._write_complete_artifacts(records, results, base)
+
+            manifest = json.loads((base / "complete" / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest[0]["reason"], "sso_required")
+            self.assertEqual(manifest[1]["reason"], "institution_pdf_entitlement_missing")
+            self.assertEqual(summary["attention_reasons"]["sso_required"], 1)
+            self.assertEqual(summary["attention_reasons"]["institution_pdf_entitlement_missing"], 1)
+            self.assertEqual(summary["manifest_items"], manifest)
+
     def test_run_records_stops_after_target_verified_count(self):
         class FakeContext:
             def close(self):
@@ -3512,6 +3732,128 @@ class ACSBatchTests(unittest.TestCase):
             manifest = json.loads((base / "complete" / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual([item["status"] for item in manifest], ["success", "missing", "missing"])
             self.assertEqual(manifest[1]["reason"], "target_verified_reached")
+
+    def test_run_records_marks_human_assist_complete_after_success(self):
+        class FakeContext:
+            def close(self):
+                return None
+
+        class FakeDownloader(PublisherBatchDownloader):
+            def _launch_context(self):
+                return FakeContext()
+
+            def fetch_one(self, _context, record, run_dir):
+                self._update_human_assist({
+                    "status": "manual_verification_required",
+                    "doi": record.doi,
+                    "challenge": {"kind": "cloudflare"},
+                    "action": "Complete the verification manually in CloakBrowser.",
+                    "diagnostic_path": str(run_dir / "diagnostics" / "challenge.json"),
+                    "screenshot_path": str(run_dir / "diagnostics" / "challenge.png"),
+                })
+                pdf_dir = run_dir / "pdfs"
+                pdf_dir.mkdir(parents=True, exist_ok=True)
+                pdf_path = pdf_dir / f"{safe_name(record.doi)}.pdf"
+                pdf_path.write_bytes(b"%PDF- fake enough for manifest copy")
+                return DownloadResult(
+                    doi=record.doi,
+                    status="success",
+                    state="pdf_response_captured",
+                    pdf_path=str(pdf_path),
+                    size_bytes=pdf_path.stat().st_size,
+                    verified_match=True,
+                )
+
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            cfg = Config(
+                output_dir=str(base / "out"),
+                cache_dir=str(base / "cache"),
+                cookie_path=str(base / "cookies.json"),
+                chrome_profile_dir=str(base / "profile"),
+                carsi_cookie_dir=str(base / "carsi"),
+            )
+            downloader = FakeDownloader(cfg, profile=WILEY_PROFILE, human_assist=True)
+            downloader._text_matches_record = lambda _text, _record, **_kwargs: True  # type: ignore[method-assign]
+            try:
+                summary = downloader.run_records(
+                    [PaperRecord(doi="10.1111/gcb.15539")],
+                    base / "run",
+                    retry_failed=False,
+                )
+                state = json.loads(
+                    (base / "run" / "human_assist" / "assist_state.json").read_text(encoding="utf-8")
+                )
+            finally:
+                if downloader._human_assist_server:
+                    downloader._human_assist_server.stop()
+
+        self.assertEqual(summary["success"], 1)
+        self.assertEqual(state["status"], "complete")
+        self.assertEqual(state["browser_action"], "verify_pdf")
+        self.assertEqual(state["summary_path"], str(base / "run" / "summary.json"))
+        self.assertEqual(state["manifest_path"], str(base / "run" / "complete" / "manifest.csv"))
+        self.assertNotIn("challenge", state)
+        self.assertNotIn("screenshot_path", state)
+        self.assertNotIn("status_reason", state)
+
+    def test_run_records_in_context_reuses_live_browser_context(self):
+        class FakeContext:
+            pass
+
+        class FakeDownloader(PublisherBatchDownloader):
+            def __init__(self, config):
+                super().__init__(config, profile=WILEY_PROFILE)
+                self.fetched = []
+
+            def _launch_context(self):
+                raise AssertionError("broker jobs must reuse the supplied live context")
+
+            def fetch_one(self, context, record, run_dir):
+                assert context is live_context
+                self.fetched.append(record.doi)
+                pdf_dir = run_dir / "pdfs"
+                pdf_dir.mkdir(parents=True, exist_ok=True)
+                pdf_path = pdf_dir / f"{safe_name(record.doi)}.pdf"
+                pdf_path.write_bytes(b"%PDF- fake enough for manifest copy")
+                return DownloadResult(
+                    doi=record.doi,
+                    status="success",
+                    state="pdf_response_captured",
+                    pdf_path=str(pdf_path),
+                    size_bytes=pdf_path.stat().st_size,
+                    verified_match=True,
+                )
+
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            cfg = Config(
+                output_dir=str(base / "out"),
+                cache_dir=str(base / "cache"),
+                cookie_path=str(base / "cookies.json"),
+                chrome_profile_dir=str(base / "profile"),
+                carsi_cookie_dir=str(base / "carsi"),
+            )
+            live_context = FakeContext()
+            downloader = FakeDownloader(cfg)
+            downloader._text_matches_record = lambda _text, _record, **_kwargs: True  # type: ignore[method-assign]
+            records = [
+                PaperRecord(doi="10.1002/one"),
+                PaperRecord(doi="10.1002/two"),
+            ]
+
+            with patch("instsci.publisher_batch.pdf_extractor.extract_text", return_value="matched text"):
+                summary = downloader.run_records_in_context(
+                    live_context,
+                    records,
+                    base / "run",
+                    retry_failed=False,
+                    target_verified=1,
+                )
+
+            self.assertEqual(downloader.fetched, ["10.1002/one"])
+            self.assertEqual(summary["success"], 1)
+            self.assertTrue(summary["target_reached"])
 
     def test_run_records_parallel_uses_requested_concurrency(self):
         class FakeContext:
@@ -3575,6 +3917,48 @@ class ACSBatchTests(unittest.TestCase):
             self.assertEqual(sorted(downloader.fetched), sorted(record.doi for record in records))
             self.assertEqual(downloader.max_active, 2)
             self.assertEqual(summary["concurrency"], 2)
+
+    def test_run_records_summary_records_extension_hash_without_paths(self):
+        class FakeContext:
+            def close(self):
+                return None
+
+        class FakeDownloader(PublisherBatchDownloader):
+            def _launch_context(self):
+                return FakeContext()
+
+            def fetch_one(self, _context, record, _run_dir):
+                return DownloadResult(
+                    doi=record.doi,
+                    status="failed",
+                    reason="pdf_not_captured",
+                    state="pdf_not_captured",
+                )
+
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            extension_dir = base / "opencli-extension"
+            cfg = Config(
+                output_dir=str(base / "out"),
+                cache_dir=str(base / "cache"),
+                cookie_path=str(base / "cookies.json"),
+                chrome_profile_dir=str(base / "profile"),
+                carsi_cookie_dir=str(base / "carsi"),
+                browser_extension_dirs=str(extension_dir),
+            )
+            downloader = FakeDownloader(cfg, profile=WILEY_PROFILE)
+
+            summary = downloader.run_records(
+                [PaperRecord(doi="10.1002/one")],
+                base / "run",
+                retry_failed=False,
+            )
+
+            summary_text = (base / "run" / "summary.json").read_text(encoding="utf-8")
+            self.assertTrue(summary["browser_extensions_enabled"])
+            self.assertEqual(summary["browser_extension_count"], 1)
+            self.assertEqual(len(summary["browser_extension_hash"]), 64)
+            self.assertNotIn(str(extension_dir), summary_text)
 
     def test_attempt_cache_skips_attempted_dois_and_appends_new_attempts(self):
         class FakeContext:

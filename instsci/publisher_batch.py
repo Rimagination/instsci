@@ -18,19 +18,25 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
 
+from .browser_actions import BrowserActionKind, observe_page
 from .challenge_assist import ChallengeDetection, HumanAssistServer, detect_challenge
 from .config import Config
+from .download_defaults import DEFAULT_LOGIN_TIMEOUT_SECONDS
 from .extractors import pdf_extractor
+from .institution_identity import (
+    institution_result_selectors,
+    is_tsinghua_institution,
+)
 from .publisher_pdf_router import (
     build_pdf_candidates,
     extract_elsevier_pii,
     is_pdf_candidate_url,
     is_supplementary_url,
 )
+from .pdf_bytes import MIN_PDF_BYTES, describe_non_pdf_bytes, is_plausible_pdf_bytes
 from .publisher_profiles import ACS_PROFILE, PublisherProfile
 
 EST_ISSN = "1520-5851"
-MIN_PDF_BYTES = 5_000
 MAX_BROWSER_CONCURRENCY = 4
 PDF_URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 
@@ -48,6 +54,33 @@ RETRYABLE_REASONS = {
     "navigation_error",
     "challenge_or_viewer_timeout",
 }
+
+HUMAN_HANDOFF_REASONS = {
+    "sso_required",
+    "challenge_or_viewer_timeout",
+    "sso_redirect_stalled",
+    "institution_required",
+}
+
+INSTITUTION_LOGIN_ACTION = (
+    "Complete institution login, 2FA, or CAPTCHA manually in the visible "
+    "CloakBrowser window. Do not type credentials into this InstSci status page."
+)
+
+SENSITIVE_TEXT_MARKERS = (
+    "password",
+    "passcode",
+    "otp",
+    "one-time",
+    "one time",
+    "recovery code",
+    "authenticator",
+    "verification code",
+    "username",
+    "login",
+    "sign in",
+    "sso",
+)
 
 
 @dataclass
@@ -145,10 +178,11 @@ class PublisherBatchDownloader:
         *,
         profile: PublisherProfile = ACS_PROFILE,
         institution_query: str = "",
-        login_timeout_sec: int = 900,
+        login_timeout_sec: int = DEFAULT_LOGIN_TIMEOUT_SECONDS,
         pdf_timeout_sec: int = 60,
         post_login_hold_sec: int = 0,
         post_run_hold_sec: int = 0,
+        keep_browser_open: bool = False,
         human_assist: bool = False,
         human_assist_host: str = "127.0.0.1",
         human_assist_port: int = 0,
@@ -160,6 +194,7 @@ class PublisherBatchDownloader:
         self.pdf_timeout_ms = max(1, pdf_timeout_sec) * 1_000
         self.post_login_hold_sec = max(0, int(post_login_hold_sec or 0))
         self.post_run_hold_sec = max(0, int(post_run_hold_sec or 0))
+        self.keep_browser_open = bool(keep_browser_open)
         self.browser_challenge_mode = self._normalize_browser_challenge_mode(
             getattr(self.config, "browser_challenge_mode", "manual")
         )
@@ -200,11 +235,126 @@ class PublisherBatchDownloader:
         if self._human_assist_server:
             self._human_assist_server.update(payload)
 
+    def _publish_human_handoff(
+        self,
+        page: Any,
+        result: DownloadResult | None,
+        run_dir: Path | None,
+        *,
+        status: str,
+        action: str = INSTITUTION_LOGIN_ACTION,
+        foreground: bool = False,
+        credential_warning: bool = True,
+        extra: dict[str, Any] | None = None,
+    ) -> bool:
+        if run_dir is not None:
+            self._start_human_assist(run_dir)
+        foregrounded = False
+        if foreground:
+            foregrounded = self._bring_page_to_front(page, result)
+        payload: dict[str, Any] = {
+            "status": status,
+            "publisher": self.profile.name,
+            "doi": result.doi if result is not None else "",
+            "url": str(getattr(page, "url", "") or ""),
+            "title": self._title(page),
+            "action": action,
+            "browser_action": BrowserActionKind.PAUSE_FOR_USER.value,
+            "credential_warning": bool(credential_warning),
+            "foregrounded": bool(foregrounded),
+        }
+        observation = observe_page(
+            page,
+            publisher=self.profile.name,
+            doi=result.doi if result is not None else "",
+            action=BrowserActionKind.PAUSE_FOR_USER,
+            challenge=extra.get("challenge") if extra else None,
+            screenshot_path=str(extra.get("screenshot_path") or "") if extra else "",
+        )
+        payload["observation"] = observation.to_dict()
+        if extra:
+            payload.update(extra)
+        self._update_human_assist(payload)
+        if result is not None:
+            self._event(result, "human_handoff", status)
+        return foregrounded
+
     def share_human_assist_from(self, other: "PublisherBatchDownloader") -> None:
         self.human_assist = other.human_assist
         self.human_assist_host = other.human_assist_host
         self.human_assist_port = other.human_assist_port
         self._human_assist_server = other._human_assist_server
+
+    def publish_resume_handoff(
+        self,
+        run_dir: Path,
+        *,
+        status: str,
+        resume_command: str,
+        paused_job_id: str = "",
+        paused_record_count: int = 0,
+        summary_path: str = "",
+    ) -> None:
+        self._start_human_assist(run_dir)
+        self._update_human_assist({
+            "status": status,
+            "publisher": self.profile.name,
+            "browser_action": BrowserActionKind.RESUME.value,
+            "action": (
+                "Complete the visible CloakBrowser institution or verification prompt, "
+                "leave the browser open, then run the resume command."
+            ),
+            "resume_command": resume_command,
+            "paused_job_id": paused_job_id,
+            "paused_record_count": paused_record_count,
+            "diagnostic_path": summary_path,
+            "credential_warning": True,
+        })
+
+    def check_session_health(self, context: Any) -> dict[str, Any]:
+        """Probe the live browser session without downloading PDFs or storing page text."""
+        page = context.new_page()
+        target_url = self._session_health_url()
+        health: dict[str, Any] = {
+            "publisher": self.profile.name,
+            "status": "unknown",
+            "reason": "",
+            "url": target_url,
+            "checked_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        try:
+            page.goto(target_url, wait_until="domcontentloaded", timeout=45_000)
+            health["url"] = str(getattr(page, "url", "") or target_url)
+            detection = self._challenge_detection(page)
+            if detection:
+                health.update({
+                    "status": "reauth_required",
+                    "reason": detection.kind,
+                    "challenge": detection.to_dict(),
+                })
+            elif self._looks_logged_out(page):
+                health.update({"status": "reauth_required", "reason": "logged_out"})
+            elif self._article_access_available(page) or self._has_publisher_institution_session(page):
+                health.update({"status": "authenticated", "reason": "access_marker"})
+            else:
+                health.update({"status": "unknown", "reason": "no_access_marker"})
+            return health
+        except Exception as exc:
+            health.update({"status": "error", "reason": f"{type(exc).__name__}: {exc}"})
+            return health
+        finally:
+            try:
+                page.close()
+            except Exception:
+                pass
+
+    def _session_health_url(self) -> str:
+        sample_doi = self.profile.sample_dois[0] if self.profile.sample_dois else ""
+        if sample_doi:
+            return self.profile.article_url(sample_doi)
+        if self.profile.base_domains:
+            return f"https://{self.profile.base_domains[0]}/"
+        return self.profile.article_url_template.split("{", 1)[0] or "https://doi.org/"
 
     def run_records(
         self,
@@ -218,11 +368,57 @@ class PublisherBatchDownloader:
         concurrency: int = 1,
     ) -> dict[str, Any]:
         """Download all records and write summary/manifest artifacts."""
+        return self._run_records_core(
+            records,
+            run_dir,
+            retry_failed=retry_failed,
+            target_verified=target_verified,
+            attempt_cache=attempt_cache,
+            skip_attempted=skip_attempted,
+            concurrency=concurrency,
+            context=None,
+        )
+
+    def run_records_in_context(
+        self,
+        context: Any,
+        records: list[PaperRecord],
+        run_dir: str | Path,
+        *,
+        retry_failed: bool = True,
+        target_verified: int | None = None,
+        attempt_cache: str | Path | None = None,
+        skip_attempted: bool = False,
+    ) -> dict[str, Any]:
+        """Download records through an already-live CloakBrowser context."""
+        return self._run_records_core(
+            records,
+            run_dir,
+            retry_failed=retry_failed,
+            target_verified=target_verified,
+            attempt_cache=attempt_cache,
+            skip_attempted=skip_attempted,
+            concurrency=1,
+            context=context,
+        )
+
+    def _run_records_core(
+        self,
+        records: list[PaperRecord],
+        run_dir: str | Path,
+        *,
+        retry_failed: bool,
+        target_verified: int | None,
+        attempt_cache: str | Path | None,
+        skip_attempted: bool,
+        concurrency: int,
+        context: Any | None,
+    ) -> dict[str, Any]:
         run_path = Path(run_dir)
         run_path.mkdir(parents=True, exist_ok=True)
         self._start_human_assist(run_path)
         target = target_verified if target_verified and target_verified > 0 else None
-        worker_count = min(max(1, int(concurrency or 1)), MAX_BROWSER_CONCURRENCY)
+        worker_count = 1 if context is not None else min(max(1, int(concurrency or 1)), MAX_BROWSER_CONCURRENCY)
         if target:
             worker_count = 1
         attempt_cache_path = Path(attempt_cache) if attempt_cache else run_path / "attempts.jsonl"
@@ -248,14 +444,24 @@ class PublisherBatchDownloader:
                 else:
                     records_to_run.append(record)
 
-        results = self._run_once(
-            records_to_run,
-            run_path / "primary",
-            target_verified=target,
-            attempt_cache_path=attempt_cache_path,
-            phase="primary",
-            concurrency=worker_count,
-        )
+        if context is not None:
+            results = self._run_once_with_context(
+                context,
+                records_to_run,
+                run_path / "primary",
+                target_verified=target,
+                attempt_cache_path=attempt_cache_path,
+                phase="primary",
+            )
+        else:
+            results = self._run_once(
+                records_to_run,
+                run_path / "primary",
+                target_verified=target,
+                attempt_cache_path=attempt_cache_path,
+                phase="primary",
+                concurrency=worker_count,
+            )
         primary_counts = self._count_results(results)
         target_reached = bool(target and self._count_verified(results) >= target)
         if target_reached and len(results) < len(records_to_run):
@@ -271,14 +477,24 @@ class PublisherBatchDownloader:
         retry_results: list[DownloadResult] = []
         if retry_failed and failed_records and not target_reached:
             remaining_target = target - self._count_verified(results) if target else None
-            retry_results = self._run_once(
-                failed_records,
-                run_path / "retry",
-                target_verified=remaining_target,
-                attempt_cache_path=attempt_cache_path,
-                phase="retry",
-                concurrency=worker_count,
-            )
+            if context is not None:
+                retry_results = self._run_once_with_context(
+                    context,
+                    failed_records,
+                    run_path / "retry",
+                    target_verified=remaining_target,
+                    attempt_cache_path=attempt_cache_path,
+                    phase="retry",
+                )
+            else:
+                retry_results = self._run_once(
+                    failed_records,
+                    run_path / "retry",
+                    target_verified=remaining_target,
+                    attempt_cache_path=attempt_cache_path,
+                    phase="retry",
+                    concurrency=worker_count,
+                )
             retry_by_doi = {result.doi.lower(): result for result in retry_results if result.ok}
             results = [
                 retry_by_doi.get(result.doi.lower(), result)
@@ -299,13 +515,60 @@ class PublisherBatchDownloader:
         summary["attempt_cache"] = str(attempt_cache_path)
         summary["concurrency"] = worker_count
         summary["browser_profile_dir"] = str(Path(self.config.chrome_profile_dir))
+        self._add_browser_extension_summary(summary)
         if self.human_assist_url:
             summary["human_assist_url"] = self.human_assist_url
         (run_path / "summary.json").write_text(
             json.dumps(summary, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        self._publish_human_assist_completion(run_path, summary)
         return summary
+
+    def _add_browser_extension_summary(self, summary: dict[str, Any]) -> None:
+        """Record extension use without leaking local extension paths."""
+        from .browser_identity import browser_extension_hash, browser_extension_paths
+
+        extension_paths = browser_extension_paths(self.config)
+        summary["browser_extensions_enabled"] = bool(extension_paths)
+        summary["browser_extension_count"] = len(extension_paths)
+        summary["browser_extension_hash"] = browser_extension_hash(self.config)
+
+    def _publish_human_assist_completion(self, run_dir: Path, summary: dict[str, Any]) -> None:
+        if not self._human_assist_server:
+            return
+        count = int(summary.get("count") or 0)
+        success = int(summary.get("success") or 0)
+        missing = int(summary.get("missing") or 0)
+        unverified = int(summary.get("unverified") or 0)
+        if not count or success != count or missing or unverified:
+            return
+        self._update_human_assist({
+            "status": "complete",
+            "publisher": self.profile.name,
+            "browser_action": BrowserActionKind.VERIFY_PDF.value,
+            "action": f"Finished: {success}/{count} verified PDFs.",
+            "summary_path": str(run_dir / "summary.json"),
+            "manifest_path": str(summary.get("manifest") or ""),
+            "pdf_dir": str(summary.get("pdf_dir") or ""),
+            "count": count,
+            "success": success,
+            "missing": missing,
+            "unverified": unverified,
+            "clear_fields": [
+                "challenge",
+                "credential_assist",
+                "credential_warning",
+                "diagnostic_path",
+                "doi",
+                "foregrounded",
+                "observation",
+                "screenshot_path",
+                "status_reason",
+                "title",
+                "url",
+            ],
+        })
 
     def _run_once(
         self,
@@ -319,6 +582,8 @@ class PublisherBatchDownloader:
     ) -> list[DownloadResult]:
         run_dir.mkdir(parents=True, exist_ok=True)
         worker_count = min(max(1, int(concurrency or 1)), len(records) or 1)
+        if self.keep_browser_open:
+            worker_count = 1
         if worker_count > 1 and not target_verified:
             return self._run_once_parallel(
                 records,
@@ -329,24 +594,50 @@ class PublisherBatchDownloader:
             )
 
         results: list[DownloadResult] = []
-        verified_count = 0
 
         context = self._launch_context()
         try:
-            for record in records:
-                result = self.fetch_one(context, record, run_dir)
-                results.append(result)
-                if result.ok and result.verified_match:
-                    verified_count += 1
-                self._append_attempt(attempt_cache_path, result, phase)
-                self._write_results(run_dir / "summary_partial.json", results)
-                if target_verified and verified_count >= target_verified:
-                    break
+            results = self._run_once_with_context(
+                context,
+                records,
+                run_dir,
+                target_verified=target_verified,
+                attempt_cache_path=attempt_cache_path,
+                phase=phase,
+            )
         finally:
+            self._hold_context_open_if_requested(context, run_dir)
             try:
                 context.close()
             except Exception:
                 pass
+
+        self._write_results(run_dir / "summary.json", results)
+        return results
+
+    def _run_once_with_context(
+        self,
+        context: Any,
+        records: list[PaperRecord],
+        run_dir: Path,
+        *,
+        target_verified: int | None = None,
+        attempt_cache_path: Path | None = None,
+        phase: str = "primary",
+    ) -> list[DownloadResult]:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        results: list[DownloadResult] = []
+        verified_count = 0
+
+        for record in records:
+            result = self.fetch_one(context, record, run_dir)
+            results.append(result)
+            if result.ok and result.verified_match:
+                verified_count += 1
+            self._append_attempt(attempt_cache_path, result, phase)
+            self._write_results(run_dir / "summary_partial.json", results)
+            if target_verified and verified_count >= target_verified:
+                break
 
         self._write_results(run_dir / "summary.json", results)
         return results
@@ -389,6 +680,7 @@ class PublisherBatchDownloader:
                 for item_index, record in items:
                     record_result(item_index, self.fetch_one(context, record, run_dir))
             finally:
+                self._hold_context_open_if_requested(context, run_dir)
                 try:
                     context.close()
                 except Exception:
@@ -436,6 +728,35 @@ class PublisherBatchDownloader:
         except Exception:
             target.mkdir(parents=True, exist_ok=True)
         return target
+
+    def _hold_context_open_if_requested(self, context: Any, run_dir: Path) -> None:
+        if not self.keep_browser_open:
+            return
+        marker = run_dir / "browser_kept_open.json"
+        marker.write_text(
+            json.dumps(
+                {
+                    "publisher": self.profile.name,
+                    "profile_dir": str(Path(self.config.chrome_profile_dir)),
+                    "started_at": datetime.now().isoformat(timespec="seconds"),
+                    "note": "CloakBrowser is being kept alive by this CLI process. Press Ctrl+C to close it.",
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        self._update_human_assist({
+            "publisher": self.profile.name,
+            "status": "browser_kept_open",
+            "action": "CloakBrowser is being kept alive by the CLI process. Press Ctrl+C in that terminal to close it.",
+        })
+        print("CloakBrowser kept open. Press Ctrl+C in this terminal to close it.")
+        try:
+            while True:
+                time.sleep(60)
+        except KeyboardInterrupt:
+            print("Closing kept-open CloakBrowser.")
 
     def _launch_context(self, profile_dir: str | Path | None = None):
         from .browser_identity import (
@@ -642,6 +963,13 @@ class PublisherBatchDownloader:
     def _complete_login_from_current_page(self, page: Any, result: DownloadResult, run_dir: Path | None = None) -> bool:
         result.state = "sso_required"
         self._event(result, "sso_start", page.url)
+        self._publish_human_handoff(
+            page,
+            result,
+            run_dir,
+            status="institution_login_required",
+            foreground=True,
+        )
         self._dismiss_cookie_banners(page, result)
         self._click_sso_entry(page, result)
         time.sleep(5)
@@ -659,6 +987,13 @@ class PublisherBatchDownloader:
             marker = f"{self._title(page)} | {getattr(page, 'url', '')[:160]}"
             if marker != last_state:
                 self._event(result, "login_state", marker)
+                self._publish_human_handoff(
+                    page,
+                    result,
+                    run_dir,
+                    status="institution_login_required",
+                    foreground=False,
+                )
                 last_state = marker
             if self._is_human_login_page(page):
                 continue
@@ -791,6 +1126,9 @@ class PublisherBatchDownloader:
             "button:has-text('Institutional Access')",
             "a:has-text('Institutional Access')",
             "button:has-text('Institutional Sign In')",
+            "#test-login-banner-link",
+            "a[href*='wayf.springernature.com']",
+            "a:has-text('log in via an institution')",
         )
         for selector in sso_selectors:
             try:
@@ -899,7 +1237,9 @@ class PublisherBatchDownloader:
         try:
             detail = page.evaluate(
                 """
-                () => {
+                (options) => {
+                  const doi = (options && options.doi || '').toLowerCase();
+                  const encodedDoi = encodeURIComponent(doi);
                   const norm = (value) => (value || '').toString().replace(/\\s+/g, ' ').trim();
                   const visible = (el) => {
                     const rect = el.getBoundingClientRect();
@@ -1017,7 +1357,14 @@ class PublisherBatchDownloader:
     def _is_human_login_page(self, page: Any) -> bool:
         current_url = str(getattr(page, "url", "") or "")
         host = (urlparse(current_url).netloc or "").lower()
-        return host.endswith("id.tsinghua.edu.cn") or host.endswith("idp.tsinghua.edu.cn")
+        human_login_hosts = (
+            "id.tsinghua.edu.cn",
+            "idp.tsinghua.edu.cn",
+            "login.microsoftonline.com",
+            "login.microsoft.com",
+            "login.live.com",
+        )
+        return any(host == marker or host.endswith(f".{marker}") for marker in human_login_hosts)
 
     def _open_aps_article_institution_login(self, page: Any, result: DownloadResult | None = None) -> bool:
         if self.profile.name.lower() != "aps":
@@ -1253,7 +1600,7 @@ class PublisherBatchDownloader:
     def _select_institution(self, page: Any, result: DownloadResult) -> bool:
         current_url = str(getattr(page, "url", "") or "")
         host = (urlparse(current_url).netloc or "").lower()
-        if host.endswith("tsinghua.edu.cn"):
+        if self._is_human_login_page(page):
             return False
         if self._select_wiley_tsinghua_openathens_wayfless(page, result):
             return True
@@ -1548,17 +1895,6 @@ class PublisherBatchDownloader:
             return False
 
         result_selectors = list(self._institution_result_selectors())
-        if self._institution_query_is_tsinghua():
-            result_selectors.extend(
-                (
-                    "text=Tsinghua University(OpenAthens)",
-                    "text=Tsinghua University (OpenAthens)",
-                    "text=Tsinghua University",
-                    "[role='option']:has-text('Tsinghua University')",
-                    "li:has-text('Tsinghua University')",
-                    "div:has-text('Tsinghua University(OpenAthens)')",
-                )
-            )
         for selector in result_selectors:
             try:
                 option = page.locator(selector).first
@@ -1628,23 +1964,13 @@ class PublisherBatchDownloader:
         return False
 
     def _institution_query_is_tsinghua(self) -> bool:
-        query = self.institution_query.lower()
-        return "tsinghua" in query or "qinghua" in query or "清华" in self.institution_query
+        return is_tsinghua_institution(self.institution_query)
 
     def _institution_result_selectors(self) -> tuple[str, ...]:
         query = self.institution_query.strip()
         if not query:
             return ()
-        literal = query.replace("\\", "\\\\").replace("'", "\\'")
-        selectors = [
-            f"text={query}",
-            f"button:has-text('{literal}')",
-            f"a:has-text('{literal}')",
-            f"[role='button']:has-text('{literal}')",
-            f"[role='option']:has-text('{literal}')",
-            f"li:has-text('{literal}')",
-            f"div:has-text('{literal}')",
-        ]
+        selectors = list(institution_result_selectors(query))
         if self._institution_query_is_tsinghua():
             selectors.extend(self.profile.institution_result_selectors)
         return tuple(dict.fromkeys(selectors))
@@ -1900,9 +2226,20 @@ class PublisherBatchDownloader:
                     .map((el) => {
                       const text = textOf(el);
                       const href = hrefOf(el);
-                      const haystack = lower(`${text} ${href} ${metaOf(el)}`);
+                      const tracking = lower([
+                        el.getAttribute('data-track') || '',
+                        el.getAttribute('data-track-action') || '',
+                        el.getAttribute('data-track-label') || '',
+                        el.getAttribute('data-track-context') || ''
+                      ].join(' '));
+                      const haystack = lower(`${text} ${href} ${metaOf(el)} ${tracking}`);
                       if (!haystack) return null;
                       if (denyPatterns.some((pattern) => haystack.includes(pattern))) return null;
+                      if (purpose === 'login' && (
+                        tracking.includes('click_references')
+                        || tracking.includes('external reference')
+                        || href.toLowerCase().includes('scholar.google.')
+                      )) return null;
                       let score = 0;
                       let reason = '';
                       const exactText = lower(text);
@@ -1915,6 +2252,7 @@ class PublisherBatchDownloader:
                           'institutional access',
                           'institutional sign in',
                           'institutional login',
+                          'log in via an institution',
                           'log in via your institution',
                           'login via your institution',
                           'log in through your institution',
@@ -1959,7 +2297,8 @@ class PublisherBatchDownloader:
                         'allow'
                       ];
                       for (const pattern of continuePatterns) {
-                        if (exactText === pattern || haystack.includes(pattern)) {
+                        const exactOnly = pattern === 'yes' || pattern === 'allow';
+                        if (exactText === pattern || (!exactOnly && haystack.includes(pattern))) {
                           if (!haystack.includes('continue reading') && !haystack.includes('continue shopping')) {
                             const nextScore = pattern === 'continue' ? 45 : 70;
                             if (nextScore > score) {
@@ -2058,6 +2397,8 @@ class PublisherBatchDownloader:
                 if self._is_plausible_pdf_bytes(body):
                     captured["bytes"] = body
                     captured["url"] = url
+                else:
+                    self._event_non_pdf_rejected(result, "pdf_response_rejected", url, body)
             except Exception:
                 return
 
@@ -2107,6 +2448,13 @@ class PublisherBatchDownloader:
                             if self._is_plausible_pdf_bytes(body):
                                 captured["bytes"] = body
                                 captured["url"] = response.url
+                            else:
+                                self._event_non_pdf_rejected(
+                                    result,
+                                    "pdf_navigation_response_rejected",
+                                    response_url,
+                                    body,
+                                )
                     if not captured["bytes"]:
                         body, final_url = self._fetch_page_state_pdf(page, response, [str(captured["deferred_url"])], doi=doi)
                         if body:
@@ -2139,7 +2487,9 @@ class PublisherBatchDownloader:
         try:
             detail = page.evaluate(
                 """
-                () => {
+                (options) => {
+                  const doi = (options && options.doi || '').toLowerCase();
+                  const encodedDoi = encodeURIComponent(doi);
                   const norm = (value) => (value || '').toString().replace(/\\s+/g, ' ').trim();
                   const visible = (el) => {
                     const rect = el.getBoundingClientRect();
@@ -2157,12 +2507,15 @@ class PublisherBatchDownloader:
                       const text = norm(el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '');
                       const href = hrefOf(el);
                       const haystack = `${text} ${href} ${el.className || ''} ${el.id || ''}`.toLowerCase();
-                      const readFullText = /\\bread the full text\\b/i.test(text) || href.toLowerCase().includes('/doi/full/');
+                      const lowerHref = href.toLowerCase();
+                      const exactLabel = /^read the full text$/i.test(text);
+                      const recordHref = doi && (lowerHref.includes(doi) || lowerHref.includes(encodedDoi));
+                      const readFullText = exactLabel || (recordHref && lowerHref.includes('/doi/full/'));
                       if (!readFullText) return null;
                       if (haystack.includes('pdf') || haystack.includes('account') || haystack.includes('register')) return null;
                       const rect = el.getBoundingClientRect();
-                      const exactScore = /^read the full text$/i.test(text) ? 100 : 0;
-                      const hrefScore = href.toLowerCase().includes('/doi/full/') ? 30 : 0;
+                      const exactScore = exactLabel ? 100 : 0;
+                      const hrefScore = recordHref && lowerHref.includes('/doi/full/') ? 30 : 0;
                       return {el, text, href, rect, score: exactScore + hrefScore - Math.max(0, rect.top / 1000)};
                     })
                     .filter(Boolean)
@@ -2178,7 +2531,8 @@ class PublisherBatchDownloader:
                     score: Math.round(target.score)
                   };
                 }
-                """
+                """,
+                {"doi": result.doi},
             )
             if isinstance(detail, dict) and detail.get("text"):
                 self._event(result, "wiley_read_full_text_clicked", json.dumps(detail, ensure_ascii=False))
@@ -2275,10 +2629,84 @@ class PublisherBatchDownloader:
             self._event(result, "pdf_button_error", f"{type(exc).__name__}: {exc}")
         return False
 
+    def _click_springer_pdf_entry(self, page: Any, result: DownloadResult, doi: str) -> bool:
+        if self.profile.name.lower() != "springer nature":
+            return False
+        try:
+            detail = page.evaluate(
+                """
+                (options) => {
+                  const doi = (options && options.doi || '').toLowerCase();
+                  const doiSuffix = doi.includes('/') ? doi.split('/').slice(1).join('/') : doi;
+                  const encodedDoi = encodeURIComponent(doi).toLowerCase();
+                  const norm = (value) => (value || '').toString().replace(/\\s+/g, ' ').trim();
+                  const visible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                  };
+                  const hrefOf = (el) => {
+                    const raw = el.href || el.getAttribute('href') || el.getAttribute('formaction') || '';
+                    if (!raw) return '';
+                    try { return new URL(raw, location.href).href; } catch { return raw; }
+                  };
+                  const isSameDoi = (href) => {
+                    const lower = href.toLowerCase();
+                    return lower.includes(doi)
+                      || lower.includes(encodedDoi)
+                      || (doiSuffix && lower.includes(doiSuffix));
+                  };
+                  const controls = [...document.querySelectorAll('a,button,[role="button"],input[type="button"],input[type="submit"]')]
+                    .filter(visible)
+                    .map((el) => {
+                      const text = norm(el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '');
+                      const href = hrefOf(el);
+                      if (!href || !isSameDoi(href)) return null;
+                      let parsed;
+                      try { parsed = new URL(href, location.href); } catch { return null; }
+                      const host = parsed.hostname.toLowerCase();
+                      const path = parsed.pathname.toLowerCase();
+                      const haystack = `${text} ${href} ${el.className || ''} ${el.id || ''}`.toLowerCase();
+                      const springerPdf = host === 'link.springer.com' && path.includes('/content/pdf/');
+                      const naturePdf = (host === 'www.nature.com' || host === 'nature.com') && path.endsWith('.pdf');
+                      if (!springerPdf && !naturePdf) return null;
+                      let score = 100;
+                      if (/^download pdf$/i.test(text)) score += 80;
+                      if (/^pdf$/i.test(text)) score += 40;
+                      if (springerPdf) score += 30;
+                      if (haystack.includes('reference') || haystack.includes('citation')) score -= 200;
+                      return {el, text, href, score};
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => b.score - a.score);
+                  const target = controls[0];
+                  if (!target || target.score <= 0) return null;
+                  target.el.scrollIntoView({block: 'center', inline: 'center'});
+                  target.el.removeAttribute('target');
+                  target.el.click();
+                  return {
+                    selector: 'springer-pdf-entry',
+                    text: target.text.slice(0, 200),
+                    href: target.href.slice(0, 500),
+                    score: Math.round(target.score)
+                  };
+                }
+                """,
+                {"doi": doi},
+            )
+            if isinstance(detail, dict) and (detail.get("text") or detail.get("href")):
+                self._event(result, "pdf_button_clicked", json.dumps(detail, ensure_ascii=False))
+                return True
+        except Exception as exc:
+            self._event(result, "pdf_button_error", f"{type(exc).__name__}: {exc}")
+        return False
+
     def _click_pdf_entry(self, page: Any, result: DownloadResult, *, doi: str = "") -> bool:
         if self.profile.name.lower() == "elsevier":
             if self._click_elsevier_view_pdf_entry(page, result):
                 return True
+        if doi and self.profile.name.lower() == "springer nature":
+            return self._click_springer_pdf_entry(page, result, doi)
         if doi and self.profile.name.lower() == "aps":
             if self._click_current_doi_pdf_entry(page, result, doi):
                 return True
@@ -2537,6 +2965,12 @@ class PublisherBatchDownloader:
             body = Path(path).read_bytes()
             if self._is_plausible_pdf_bytes(body):
                 return body, str(getattr(download, "url", "") or pdf_url)
+            self._event_non_pdf_rejected(
+                result,
+                "download_non_pdf_rejected",
+                str(getattr(download, "url", "") or pdf_url),
+                body,
+            )
         except Exception as exc:
             self._event(result, "download_capture_error", f"{type(exc).__name__}: {exc}")
         return None, pdf_url
@@ -2599,6 +3033,12 @@ class PublisherBatchDownloader:
                 if self._is_plausible_pdf_bytes(body):
                     self._event(result, "pdf_viewer_download_captured", json.dumps(detail, ensure_ascii=False))
                     return body, str(getattr(download, "url", "") or getattr(page, "url", "") or "")
+                self._event_non_pdf_rejected(
+                    result,
+                    "pdf_viewer_download_non_pdf_rejected",
+                    str(getattr(download, "url", "") or getattr(page, "url", "") or ""),
+                    body,
+                )
             except Exception as exc:
                 self._event(result, "pdf_viewer_download_error", f"{type(exc).__name__}: {exc}")
         except Exception as exc:
@@ -2630,6 +3070,12 @@ class PublisherBatchDownloader:
                 detail = {"selector": "pdf-viewer-toolbar-download", "x": x, "y": y}
                 self._event(result, "pdf_viewer_toolbar_download_captured", json.dumps(detail, ensure_ascii=False))
                 return body, str(getattr(download, "url", "") or getattr(page, "url", "") or "")
+            self._event_non_pdf_rejected(
+                result,
+                "pdf_viewer_toolbar_download_non_pdf_rejected",
+                str(getattr(download, "url", "") or getattr(page, "url", "") or ""),
+                body,
+            )
         except Exception as exc:
             self._event(result, "pdf_viewer_toolbar_download_error", f"{type(exc).__name__}: {exc}")
         return None, ""
@@ -2686,17 +3132,26 @@ class PublisherBatchDownloader:
 
     @staticmethod
     def _is_plausible_pdf_bytes(body: Any) -> bool:
-        if not isinstance(body, (bytes, bytearray)):
-            return False
-        data = bytes(body)
-        if not data.startswith(b"%PDF-") or len(data) <= MIN_PDF_BYTES:
-            return False
-        if b"\xef\xbf\xbd" in data[:64]:
-            return False
-        eof = data.rfind(b"%%EOF")
-        if eof == -1:
-            return True
-        return eof >= max(0, len(data) - 8192)
+        return is_plausible_pdf_bytes(body)
+
+    @staticmethod
+    def _non_pdf_bytes_reason(body: Any) -> str:
+        return describe_non_pdf_bytes(body)
+
+    def _event_non_pdf_rejected(
+        self,
+        result: DownloadResult,
+        state: str,
+        url: str,
+        body: Any,
+    ) -> None:
+        size = len(body) if isinstance(body, (bytes, bytearray)) else 0
+        detail = {
+            "url": str(url or ""),
+            "reason": self._non_pdf_bytes_reason(body),
+            "size_bytes": str(size),
+        }
+        self._event(result, state, json.dumps(detail, ensure_ascii=False))
 
     def _fetch_pdf_url_with_browser_state(self, url: str, page: Any) -> tuple[bytes | None, str]:
         try:
@@ -2823,14 +3278,6 @@ class PublisherBatchDownloader:
             doi,
             source_url=str(getattr(page, "url", "") or ""),
             discovered_urls=candidates,
-        )
-
-    def _filter_pdf_candidates_for_current_article(self, urls: list[str], page: Any, doi: str) -> list[str]:
-        return build_pdf_candidates(
-            self.profile,
-            doi,
-            source_url=str(getattr(page, "url", "") or ""),
-            discovered_urls=urls,
         )
 
     @staticmethod
@@ -2996,10 +3443,13 @@ class PublisherBatchDownloader:
                 "provide your credentials",
                 "get access",
                 "log in via your institution",
+                "log in via an institution",
                 "access through your organization",
                 "access through your institution",
                 "institutional access",
                 "no access",
+                "preview of subscription content",
+                "buy article pdf",
                 "purchase pdf",
                 "purchase this article",
                 "sign in to continue reading",
@@ -3071,6 +3521,19 @@ class PublisherBatchDownloader:
             return ""
         return re.sub(r"\s+", " ", text).strip()[:limit]
 
+    def _diagnostic_body_excerpt(self, page: Any, result: DownloadResult, limit: int = 2_000) -> tuple[str, bool]:
+        text = self._body_text(page, limit)
+        haystack = f"{self._title(page)} {getattr(page, 'url', '')} {text}".lower()
+        is_sensitive = (
+            result.reason in HUMAN_HANDOFF_REASONS
+            or result.state in HUMAN_HANDOFF_REASONS
+            or any(marker in haystack for marker in SENSITIVE_TEXT_MARKERS)
+            or bool(re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", text))
+        )
+        if not is_sensitive:
+            return text, False
+        return "[redacted: login or credential page body omitted]", True
+
     @staticmethod
     def _event(result: DownloadResult, state: str, detail: str = "") -> None:
         result.events.append({"state": state, "detail": detail[:500]})
@@ -3095,13 +3558,15 @@ class PublisherBatchDownloader:
         except Exception:
             screenshot_path = Path("")
         self._start_human_assist(run_dir)
+        body_excerpt, body_redacted = self._diagnostic_body_excerpt(page, result, 2_000)
         packet = {
             "doi": result.doi,
             "publisher": self.profile.name,
             "url": str(getattr(page, "url", "") or ""),
             "title": self._title(page),
             "challenge": detection.to_dict(),
-            "body_excerpt": self._body_text(page, 2_000),
+            "body_excerpt": body_excerpt,
+            "body_excerpt_redacted": body_redacted,
             "screenshot_path": str(screenshot_path),
             "foregrounded": bool(foregrounded),
             "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -3127,11 +3592,13 @@ class PublisherBatchDownloader:
         diag_dir.mkdir(parents=True, exist_ok=True)
         result.final_url = getattr(page, "url", result.final_url)
         result.title = self._title(page)
+        body_excerpt, body_redacted = self._diagnostic_body_excerpt(page, result, 2_000)
         packet = {
             **asdict(result),
             "publisher": self.profile.name,
             "browser_profile_dir": str(Path(self.config.chrome_profile_dir)),
-            "body_excerpt": self._body_text(page, 2_000),
+            "body_excerpt": body_excerpt,
+            "body_excerpt_redacted": body_redacted,
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
         packet_path = diag_dir / "diagnostic.json"
@@ -3141,6 +3608,18 @@ class PublisherBatchDownloader:
         except Exception:
             pass
         result.diagnostic_path = str(packet_path)
+        if result.reason in HUMAN_HANDOFF_REASONS or result.state in HUMAN_HANDOFF_REASONS:
+            self._publish_human_handoff(
+                page,
+                result,
+                run_dir,
+                status=result.reason or result.state or "manual_attention_required",
+                foreground=True,
+                extra={
+                    "diagnostic_path": str(packet_path),
+                    "screenshot_path": str(diag_dir / "screenshot.png"),
+                },
+            )
 
     @staticmethod
     def _write_results(path: Path, results: list[DownloadResult]) -> None:
@@ -3214,8 +3693,9 @@ class PublisherBatchDownloader:
         pdf_dir = complete_dir / "pdfs"
         pdf_dir.mkdir(parents=True, exist_ok=True)
         missing_reasons = missing_reasons or {}
-        result_by_doi = {result.doi.lower(): result for result in results if result.ok}
+        result_by_doi = {result.doi.lower(): result for result in results}
         manifest: list[dict[str, Any]] = []
+        attention_reasons: dict[str, int] = {}
 
         for record in records:
             result = result_by_doi.get(record.doi.lower())
@@ -3230,7 +3710,9 @@ class PublisherBatchDownloader:
                 "text_length": 0,
                 "verified_match": False,
             }
-            if result and result.pdf_path:
+            if result and not result.ok:
+                item["reason"] = result.reason
+            if result and result.ok and result.pdf_path:
                 src = Path(result.pdf_path)
                 dst = pdf_dir / src.name
                 if src.exists():
@@ -3247,6 +3729,9 @@ class PublisherBatchDownloader:
                             "verified_match": verified_match,
                         }
                     )
+            if item["status"] != "success" and item["reason"]:
+                reason = str(item["reason"])
+                attention_reasons[reason] = attention_reasons.get(reason, 0) + 1
             manifest.append(item)
 
         complete_dir.mkdir(parents=True, exist_ok=True)
@@ -3267,6 +3752,8 @@ class PublisherBatchDownloader:
             "verified_match": sum(1 for item in manifest if item["verified_match"]),
             "pdf_dir": str(pdf_dir),
             "manifest": str(complete_dir / "manifest.csv"),
+            "manifest_items": manifest,
+            "attention_reasons": attention_reasons,
         }
 
     @staticmethod
@@ -3315,7 +3802,7 @@ class ACSCloakBatchDownloader(PublisherBatchDownloader):
         config: Config | None = None,
         *,
         institution_query: str = "",
-        login_timeout_sec: int = 900,
+        login_timeout_sec: int = DEFAULT_LOGIN_TIMEOUT_SECONDS,
         pdf_timeout_sec: int = 60,
     ) -> None:
         super().__init__(

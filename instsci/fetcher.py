@@ -14,10 +14,11 @@ import requests
 
 from .auth import EZProxyAuth, WebVPNAuth
 from .http_utils import request_with_retry
-from .carsi import CARSIClient, detect_publisher
+from .carsi import CARSIClient
 from .config import Config
 from .extractors import html_extractor, pdf_extractor
 from .models import FetchResult, NextAction, Paper
+from .pdf_bytes import describe_non_pdf_bytes, is_plausible_pdf_bytes
 from .publisher_pdf_router import build_pdf_candidates, discover_pdf_candidates_from_html
 from .publisher_profiles import infer_publisher_profile, infer_publisher_profile_from_url
 from .sources import arxiv, unpaywall
@@ -552,6 +553,18 @@ class PaperFetcher:
         if not pdf_path.exists():
             logger.info("CloakBrowser manifest PDF path is missing: %s", pdf_path)
             return None
+        try:
+            pdf_bytes = pdf_path.read_bytes()
+        except OSError as exc:
+            logger.warning("Failed to read CloakBrowser PDF path %s: %s", pdf_path, exc)
+            return None
+        if not is_plausible_pdf_bytes(pdf_bytes):
+            logger.info(
+                "CloakBrowser manifest path is not a PDF: %s (%s)",
+                pdf_path,
+                describe_non_pdf_bytes(pdf_bytes),
+            )
+            return None
 
         paper.full_text = pdf_extractor.extract_text(pdf_path)
         paper.pdf_path = str(pdf_path)
@@ -897,6 +910,13 @@ class PaperFetcher:
 
     def _save_pdf(self, doi: str, pdf_bytes: bytes) -> Path | None:
         """Save PDF to output directory."""
+        if not is_plausible_pdf_bytes(pdf_bytes):
+            logger.warning(
+                "Refusing to save non-PDF payload for %s: %s",
+                doi,
+                describe_non_pdf_bytes(pdf_bytes),
+            )
+            return None
         safe_name = re.sub(r"[^\w\-.]", "_", doi)
         pdf_path = Path(self.config.output_dir) / f"{safe_name}.pdf"
         try:

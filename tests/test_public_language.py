@@ -88,11 +88,17 @@ class PublicLanguageTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("InstSci Doctor", result.output)
         self.assertIn("dependency conflicts", result.output.lower())
+        self.assertIn("Current: pipx install", result.output)
+        self.assertIn("git+https://github.com/Rimagination", result.output)
+        self.assertIn("/instsci.git", result.output)
         self.assertIn("pipx install instsci", result.output)
 
     def test_readme_recommends_isolated_tool_install_for_users(self):
         text = Path("README.md").read_text(encoding="utf-8")
 
+        self.assertIn("pipx install git+https://github.com/Rimagination/instsci.git", text)
+        self.assertIn("uv tool install git+https://github.com/Rimagination/instsci.git", text)
+        self.assertIn("After the PyPI release", text)
         self.assertIn("pipx install instsci", text)
         self.assertIn("uv tool install instsci", text)
         self.assertIn("Development install", text)

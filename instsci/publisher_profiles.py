@@ -61,6 +61,11 @@ class PublisherProfile:
             "doi_suffix": doi_suffix,
             "doi_suffix_quoted": quote(doi_suffix, safe=""),
         }
+        if self.name.lower() == "springer nature":
+            normalized = doi.strip().lower()
+            if normalized.startswith("10.1038/"):
+                return [f"https://www.nature.com/articles/{values['doi_suffix']}.pdf"]
+            return [f"https://link.springer.com/content/pdf/{values['doi_quoted']}.pdf"]
         return [template.format(**values) for template in self.pdf_url_templates]
 
 
@@ -125,13 +130,6 @@ ACS_PROFILE = PublisherProfile(
         "input[placeholder*='University']",
         "input[placeholder*='Organization']",
         "#searchInstitution",
-    ),
-    institution_result_selectors=(
-        "button:has-text('Tsinghua University')",
-        "button:has-text('清华大学')",
-        "[role='button']:has-text('Tsinghua')",
-        "li:has-text('Tsinghua')",
-        "li:has-text('清华')",
     ),
 )
 
@@ -336,12 +334,6 @@ ELSEVIER_PROFILE = PublisherProfile(
         "input[type='text']",
         "input",
     ),
-    institution_result_selectors=(
-        "button:has-text('清华大学')",
-        "button:has-text('Tsinghua University')",
-        "[role='button']:has-text('Tsinghua')",
-        "li:has-text('Tsinghua')",
-    ),
 )
 
 IEEE_PROFILE = PublisherProfile(
@@ -374,12 +366,6 @@ IEEE_PROFILE = PublisherProfile(
         "input[aria-label*='Institution']",
         "input.inst-typeahead-input",
         "xpath=(//*[normalize-space()='Search for your Institution']/following::input[1])",
-    ),
-    institution_result_selectors=(
-        "button:has-text('Tsinghua University')",
-        "[role='button']:has-text('Tsinghua University')",
-        "[role='option']:has-text('Tsinghua University')",
-        "li:has-text('Tsinghua University')",
     ),
 )
 
@@ -417,13 +403,6 @@ IOP_PROFILE = PublisherProfile(
         "input[type='text']",
         "input",
     ),
-    institution_result_selectors=(
-        "button:has-text('Tsinghua University')",
-        "button:has-text('清华大学')",
-        "[role='button']:has-text('Tsinghua')",
-        "[role='option']:has-text('Tsinghua')",
-        "li:has-text('Tsinghua')",
-    ),
 )
 
 RSC_PROFILE = PublisherProfile(
@@ -444,6 +423,7 @@ RSC_PROFILE = PublisherProfile(
     sso_text_markers=(
         "institutional login",
         "log in through your institution",
+        "log in via an institution",
         "access through your institution",
         "openathens",
     ),
@@ -500,6 +480,11 @@ SPRINGER_PROFILE = PublisherProfile(
         ),
     ),
     pdf_url_markers=("/content/pdf/", ".pdf", "pdf"),
+    institution_input_selectors=(
+        "input[type='search']",
+        "input[type='text']",
+        "input",
+    ),
 )
 
 WORLD_SCIENTIFIC_PROFILE = PublisherProfile(
@@ -533,13 +518,6 @@ WORLD_SCIENTIFIC_PROFILE = PublisherProfile(
         "input[placeholder*='institution']",
         "input[type='text']",
         "input",
-    ),
-    institution_result_selectors=(
-        "button:has-text('Tsinghua University')",
-        "a:has-text('Tsinghua University')",
-        "[role='option']:has-text('Tsinghua')",
-        ".ui-menu-item:has-text('Tsinghua')",
-        "li:has-text('Tsinghua')",
     ),
 )
 
@@ -784,13 +762,6 @@ SCIENCE_PROFILE = PublisherProfile(
         "input[placeholder='Type the name of your institution']",
         "input[placeholder*='name of your institution']",
         "xpath=(//*[normalize-space()='Find your institution']/following::input[1])",
-    ),
-    institution_result_selectors=(
-        "button:has-text('Tsinghua University')",
-        "a:has-text('Tsinghua University')",
-        "[role='option']:has-text('Tsinghua University')",
-        "li:has-text('Tsinghua University')",
-        "div:has-text('Tsinghua University')",
     ),
 )
 

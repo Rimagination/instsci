@@ -195,6 +195,21 @@ def is_supplementary_url(profile: PublisherProfile, url: str) -> bool:
 
 
 def belongs_to_current_article(profile: PublisherProfile, url: str, *, doi: str, source_url: str = "") -> bool:
+    if profile.name.lower() == "springer nature":
+        lower = url.lower()
+        host = (urlparse(url).hostname or "").lower()
+        doi_lower = doi.lower()
+        doi_escaped = quote(doi_lower, safe="").lower()
+        doi_suffix = doi_lower.split("/", 1)[-1] if "/" in doi_lower else doi_lower
+        if host == "link.springer.com":
+            if "/content/pdf/" not in lower:
+                return False
+            return doi_lower in lower or doi_escaped in lower
+        if host in {"www.nature.com", "nature.com"}:
+            if not lower.endswith(".pdf"):
+                return False
+            return doi_lower.startswith("10.1038/") and doi_suffix in lower
+        return False
     if profile.name.lower() == "aps":
         lower = url.lower()
         host = (urlparse(url).hostname or "").lower()

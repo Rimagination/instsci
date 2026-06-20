@@ -26,6 +26,12 @@ from rich.console import Console
 from rich.table import Table
 
 from .config import Config
+from .download_defaults import (
+    DEFAULT_BROWSER_SPEED,
+    DEFAULT_BROKER_TTL_SECONDS,
+    DEFAULT_KEEPALIVE_INTERVAL_SECONDS,
+    DEFAULT_LOGIN_TIMEOUT_SECONDS,
+)
 from .fetcher import PaperFetcher
 from .schools import get_school, list_schools, search_schools
 from .sources import semantic_scholar
@@ -128,10 +134,12 @@ def _resolve_subscription_institution(
 
 
 _BROWSER_SPEED_MODES = ("careful", "balanced", "fast")
+OVERNIGHT_LOGIN_TIMEOUT_SECONDS = DEFAULT_LOGIN_TIMEOUT_SECONDS
+OVERNIGHT_BROKER_TTL_SECONDS = DEFAULT_BROKER_TTL_SECONDS
 
 
 def _normalize_speed_mode(speed: str) -> str:
-    value = (speed or "balanced").strip().lower()
+    value = (speed or DEFAULT_BROWSER_SPEED).strip().lower()
     if value not in _BROWSER_SPEED_MODES:
         allowed = ", ".join(_BROWSER_SPEED_MODES)
         raise ValueError(f"Unsupported speed mode '{speed}'. Available: {allowed}")
@@ -149,6 +157,34 @@ def _effective_browser_concurrency(speed: str, requested: int) -> int:
     if speed_mode == "fast":
         return min(requested_value, 2)
     return 1
+
+
+def _apply_overnight_mode(
+    *,
+    login_timeout: int,
+    broker: bool,
+    broker_ttl: int,
+    speed_mode: str,
+    concurrency: int,
+) -> tuple[int, bool, int, str, int]:
+    """Use a conservative long-lived browser preset for unattended batches."""
+    return (
+        max(int(login_timeout or 0), OVERNIGHT_LOGIN_TIMEOUT_SECONDS),
+        True,
+        max(int(broker_ttl or 0), OVERNIGHT_BROKER_TTL_SECONDS),
+        "careful",
+        1,
+    )
+
+
+def _print_overnight_notice(login_timeout: int, broker_ttl: int) -> None:
+    console.print(
+        "[yellow]Overnight mode keeps a live broker browser and waits longer for manual re-auth; "
+        "it does not store institution credentials, OTPs, or CAPTCHA answers.[/yellow]"
+    )
+    console.print(
+        f"[dim]Overnight mode: login wait {login_timeout}s, broker TTL {broker_ttl}s, browser workers 1.[/dim]"
+    )
 
 
 def _publisher_profile_key(profile) -> str:
@@ -204,6 +240,15 @@ def _broker_records(records) -> list[dict[str, str]]:
     ]
 
 
+def _read_doi_lines(file: Path) -> list[str]:
+    dois: list[str] = []
+    for line in file.read_text(encoding="utf-8-sig").splitlines():
+        doi = line.strip().lstrip("\ufeff").strip()
+        if doi and not doi.startswith("#"):
+            dois.append(doi)
+    return dois
+
+
 def _print_speed_notice(speed_mode: str, requested: int, effective: int, *, broker: bool = False) -> None:
     if broker:
         console.print("[dim]Session broker reuses one live CloakBrowser context per publisher.[/dim]")
@@ -223,6 +268,16 @@ def _print_download_summary(summary: dict, *, include_attempt_cache: bool = Fals
         f"[bold]Done:[/bold] {summary['success']}/{summary['count']} verified PDFs, "
         f"{summary.get('unverified', 0)} unverified PDFs."
     )
+    if summary.get("broker_status") == "reauth_required":
+        console.print("[yellow]Broker paused for manual institution re-authentication.[/yellow]")
+        if summary.get("paused_job_id"):
+            console.print(f"[dim]Paused job: {summary['paused_job_id']} ({summary.get('paused_record_count', 0)} records)[/dim]")
+        if summary.get("resume_command"):
+            console.print(f"[dim]Resume after completing the visible browser prompt: {summary['resume_command']}[/dim]")
+        credential_assist = summary.get("credential_assist") if isinstance(summary.get("credential_assist"), dict) else {}
+        trigger_command = str(credential_assist.get("trigger_command") or "").strip()
+        if trigger_command:
+            console.print(f"[dim]KeePassXC Auto-Type assist: {trigger_command}[/dim]")
     if summary.get("pdf_dir"):
         console.print(f"[dim]PDF dir: {summary['pdf_dir']}[/dim]")
     if summary.get("manifest"):
@@ -249,16 +304,40 @@ def _run_papers_group(
     concurrency: int,
     broker: bool,
     broker_ttl: int,
-    human_assist: bool,
-    human_assist_host: str,
-    human_assist_port: int,
+    target_verified: int | None = None,
+    attempt_cache: str | None = None,
+    skip_attempted: bool = False,
+    keep_browser_open: bool = False,
+    human_assist: bool = False,
+    human_assist_host: str = "127.0.0.1",
+    human_assist_port: int = 0,
 ) -> dict:
     from .publisher_batch import PublisherBatchDownloader
 
     if broker:
         from . import session_broker
+        from .browser_identity import browser_extension_hash, browser_proxy_hash
 
-        if not session_broker.broker_is_running(publisher_key):
+        requested_proxy_hash = browser_proxy_hash(cfg)
+        requested_extension_hash = browser_extension_hash(cfg)
+        running = session_broker.broker_is_running(publisher_key)
+        if running:
+            broker_matches, mismatch_reason = session_broker.broker_identity_matches(
+                publisher_key,
+                profile_dir=cfg.chrome_profile_dir,
+                institution=institution,
+                browser_proxy_url_hash=requested_proxy_hash,
+                browser_extension_hash=requested_extension_hash,
+            )
+            if not broker_matches:
+                console.print(
+                    f"[yellow]Existing session broker not reused: {mismatch_reason}. "
+                    "Falling back to a one-shot browser workflow.[/yellow]"
+                )
+                broker = False
+                running = False
+
+        if broker and not running:
             console.print(f"[dim]Starting publisher session broker: {publisher_key}[/dim]")
             session_broker.start_broker_process(
                 publisher=publisher_key,
@@ -273,24 +352,44 @@ def _run_papers_group(
             deadline = time.time() + 30
             while time.time() < deadline and not session_broker.broker_is_running(publisher_key):
                 time.sleep(1)
-        if session_broker.broker_is_running(publisher_key):
-            console.print(f"[bold]Session broker:[/bold] running ({publisher_key})")
-            timeout_seconds = max(
-                120,
-                login_timeout + len(records) * (pdf_timeout + post_login_hold + post_run_hold + 60),
-            )
-            return session_broker.submit_broker_job(
-                publisher=publisher_key,
-                records=_broker_records(records),
-                output_dir=str(run_dir),
+
+        if broker and session_broker.broker_is_running(publisher_key):
+            broker_matches, mismatch_reason = session_broker.broker_identity_matches(
+                publisher_key,
+                profile_dir=cfg.chrome_profile_dir,
                 institution=institution,
-                login_timeout=login_timeout,
-                pdf_timeout=pdf_timeout,
-                post_login_hold=post_login_hold,
-                post_run_hold=post_run_hold,
-                timeout_seconds=timeout_seconds,
+                browser_proxy_url_hash=requested_proxy_hash,
+                browser_extension_hash=requested_extension_hash,
             )
-        console.print("[yellow]Session broker did not start; falling back to one-shot browser workflow.[/yellow]")
+            if not broker_matches:
+                console.print(
+                    f"[yellow]Session broker started but identity was not reusable: {mismatch_reason}. "
+                    "Falling back to a one-shot browser workflow.[/yellow]"
+                )
+                broker = False
+            else:
+                console.print(f"[bold]Session broker:[/bold] running ({publisher_key})")
+                timeout_seconds = max(
+                    120,
+                    login_timeout + len(records) * (pdf_timeout + post_login_hold + post_run_hold + 60),
+                )
+                return session_broker.submit_broker_job(
+                    publisher=publisher_key,
+                    records=_broker_records(records),
+                    output_dir=str(run_dir),
+                    institution=institution,
+                    login_timeout=login_timeout,
+                    pdf_timeout=pdf_timeout,
+                    post_login_hold=post_login_hold,
+                    post_run_hold=post_run_hold,
+                    timeout_seconds=timeout_seconds,
+                    retry_failed=retry_failed,
+                    target_verified=target_verified,
+                    attempt_cache=attempt_cache or "",
+                    skip_attempted=skip_attempted,
+                )
+        if broker:
+            console.print("[yellow]Session broker did not start; falling back to one-shot browser workflow.[/yellow]")
 
     downloader = PublisherBatchDownloader(
         cfg,
@@ -300,6 +399,7 @@ def _run_papers_group(
         pdf_timeout_sec=pdf_timeout,
         post_login_hold_sec=post_login_hold,
         post_run_hold_sec=post_run_hold,
+        keep_browser_open=keep_browser_open,
         human_assist=human_assist,
         human_assist_host=human_assist_host,
         human_assist_port=human_assist_port,
@@ -309,6 +409,9 @@ def _run_papers_group(
         run_dir,
         retry_failed=retry_failed,
         concurrency=concurrency,
+        target_verified=target_verified,
+        attempt_cache=attempt_cache,
+        skip_attempted=skip_attempted,
     )
 
 
@@ -317,6 +420,12 @@ def _path_status(path_value: str) -> tuple[str, str]:
         return "missing", ""
     path = Path(path_value)
     return ("ok" if path.exists() else "missing", str(path))
+
+
+def _disable_browser_extensions(cfg: Config, *, label: str = "Browser extensions") -> None:
+    if cfg.browser_extension_dirs:
+        console.print(f"[yellow]{label} disabled for this run:[/yellow] {cfg.browser_extension_dirs}")
+    cfg.browser_extension_dirs = ""
 
 
 def _show_setup_check(cfg: Config) -> bool:
@@ -396,7 +505,11 @@ def _run_pip_check() -> tuple[str, str]:
 def _doctor_checks() -> list[tuple[str, str, str]]:
     checks: list[tuple[str, str, str]] = [
         ("Python runtime", "ok", sys.executable),
-        ("User install", "info", "Recommended: pipx install instsci or uv tool install instsci"),
+        (
+            "User install",
+            "info",
+            "Current: pipx install git+https://github.com/Rimagination/instsci.git; PyPI after release: pipx install instsci",
+        ),
     ]
 
     for command in ("instsci", "instsci-mcp"):
@@ -532,6 +645,71 @@ def login(
         raise typer.Exit(1)
 
 
+@app.command("keepassxc-autotype")
+def keepassxc_autotype(
+    expected_domain: str = typer.Option("", "--expected-domain", help="Expected login domain before Auto-Type is triggered."),
+    login_url: str = typer.Option("", "--login-url", help="Optional current/login URL to validate against --expected-domain."),
+    hotkey: str = typer.Option("ctrl+alt+a", "--hotkey", help="KeePassXC global Auto-Type hotkey."),
+    trigger: bool = typer.Option(False, "--trigger", help="After confirmation, send the KeePassXC Auto-Type hotkey to the focused window."),
+    countdown: int = typer.Option(3, "--countdown", min=0, max=30, help="Seconds to wait after confirmation before sending the hotkey."),
+):
+    """Assist KeePassXC Auto-Type without reading institution credentials."""
+    from .keepassxc_autotype import (
+        domain_matches,
+        format_hotkey,
+        normalize_hotkey,
+        trigger_keepassxc_autotype,
+    )
+
+    try:
+        normalized_hotkey = normalize_hotkey(hotkey)
+    except ValueError as exc:
+        console.print(f"[red]Invalid hotkey:[/red] {exc}")
+        raise typer.Exit(1)
+
+    if expected_domain and login_url and not domain_matches(login_url, expected_domain):
+        console.print(
+            f"[red]Login URL does not match expected domain:[/red] "
+            f"{login_url} != {expected_domain}"
+        )
+        raise typer.Exit(1)
+
+    hotkey_label = format_hotkey(normalized_hotkey)
+    canonical_hotkey = "+".join(normalized_hotkey)
+    console.print("[bold]KeePassXC Auto-Type assist[/bold]")
+    console.print("[dim]InstSci does not read, print, store, or retrieve your credentials.[/dim]")
+    if expected_domain:
+        console.print(f"  Expected domain: [cyan]{expected_domain}[/cyan]")
+    if login_url:
+        console.print(f"  Login URL:        [cyan]{login_url}[/cyan]")
+    console.print(f"  Auto-Type hotkey: [cyan]{hotkey_label}[/cyan]")
+    console.print()
+    console.print("Before triggering:")
+    console.print("  1. Verify the visible browser URL is the intended institution login domain.")
+    console.print("  2. Unlock KeePassXC and make sure the matching entry has an Auto-Type sequence.")
+    console.print("  3. Focus the username field in the visible CloakBrowser window.")
+
+    if not trigger:
+        console.print()
+        console.print("[dim]Run again with --trigger when the browser is focused and you are ready.[/dim]")
+        return
+
+    if not typer.confirm(f"Send {hotkey_label} to the currently focused window now?", default=False):
+        console.print("[yellow]Auto-Type trigger cancelled.[/yellow]")
+        raise typer.Exit(1)
+
+    for remaining in range(countdown, 0, -1):
+        console.print(f"[dim]Sending hotkey in {remaining}...[/dim]")
+        time.sleep(1)
+
+    try:
+        trigger_keepassxc_autotype(canonical_hotkey)
+    except Exception as exc:
+        console.print(f"[red]Failed to send KeePassXC Auto-Type hotkey:[/red] {exc}")
+        raise typer.Exit(1)
+    console.print("[green]Auto-Type hotkey sent.[/green]")
+
+
 @app.command()
 def fetch(
     identifier: str = typer.Argument(help="DOI or URL of the paper to fetch."),
@@ -592,11 +770,7 @@ def batch(
         console.print(f"[red]File not found: {file}[/red]")
         raise typer.Exit(1)
 
-    dois = [
-        line.strip()
-        for line in file.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
+    dois = _read_doi_lines(file)
 
     if not dois:
         console.print("[yellow]No DOIs found in file.[/yellow]")
@@ -654,7 +828,7 @@ def est_batch(
     output: str = typer.Option("", "--output", "-o", help="Run output directory."),
     retry_failed: bool = typer.Option(True, "--retry/--no-retry", help="Retry transient failures in a fresh browser context."),
     institution: str = typer.Option("", "--institution", help="Subscription institution search text. Omit to use configured institution or prompt."),
-    login_timeout: int = typer.Option(900, "--login-timeout", help="Seconds to wait for manual SSO/2FA completion."),
+    login_timeout: int = typer.Option(DEFAULT_LOGIN_TIMEOUT_SECONDS, "--login-timeout", help="Seconds to wait for manual SSO/2FA completion."),
     pdf_timeout: int = typer.Option(60, "--pdf-timeout", help="Seconds to wait for each candidate PDF navigation."),
     post_login_hold: int = typer.Option(0, "--post-login-hold", help="Seconds to keep the authorized article page open before PDF capture."),
     post_run_hold: int = typer.Option(0, "--post-run-hold", help="Seconds to keep the browser page open after capture or failure."),
@@ -716,16 +890,23 @@ def publisher_batch(
     browser_profile: str = typer.Option("", "--browser-profile", help="Override the persistent CloakBrowser profile directory."),
     retry_failed: bool = typer.Option(True, "--retry/--no-retry", help="Retry transient failures in a fresh browser context."),
     institution: str = typer.Option("", "--institution", help="Subscription institution search text. Omit to use configured institution or prompt."),
-    login_timeout: int = typer.Option(900, "--login-timeout", help="Seconds to wait for manual SSO/2FA completion."),
+    login_timeout: int = typer.Option(DEFAULT_LOGIN_TIMEOUT_SECONDS, "--login-timeout", help="Seconds to wait for manual SSO/2FA completion."),
     pdf_timeout: int = typer.Option(60, "--pdf-timeout", help="Seconds to wait for each candidate PDF navigation."),
-    speed: str = typer.Option("balanced", "--speed", help="Speed preset: careful/balanced reuse one browser context; fast permits up to 2 workers."),
+    post_login_hold: int = typer.Option(0, "--post-login-hold", help="Seconds to keep the authorized article page open before PDF capture."),
+    post_run_hold: int = typer.Option(0, "--post-run-hold", help="Seconds to keep the browser page open after capture or failure."),
+    speed: str = typer.Option(DEFAULT_BROWSER_SPEED, "--speed", help="Speed preset: careful/balanced reuse one browser context; fast permits up to 2 workers."),
     concurrency: int = typer.Option(1, "--concurrency", "-j", min=1, max=4, help="Requested browser workers. Only --speed fast uses more than one context."),
+    broker: bool = typer.Option(True, "--broker/--no-broker", help="Use the long-lived publisher session broker by default."),
+    broker_ttl: int = typer.Option(DEFAULT_BROKER_TTL_SECONDS, "--broker-ttl", help="Seconds to keep an auto-started broker alive."),
+    overnight: bool = typer.Option(False, "--overnight", help="Compatibility flag: long-lived broker defaults are already enabled; also forces careful single-context settings."),
+    keep_browser_open: bool = typer.Option(False, "--keep-browser-open", help="In --no-broker mode, keep the one-shot CloakBrowser open until Ctrl+C."),
     target_verified: int = typer.Option(0, "--target-verified", help="Stop after this many verified PDFs. Zero disables early stop."),
     attempt_cache: str = typer.Option("", "--attempt-cache", help="JSONL attempt cache path. Defaults to attempts.jsonl in the run directory."),
     skip_attempted: bool = typer.Option(False, "--skip-attempted", help="Skip DOIs already present in the attempt cache."),
-    human_assist: bool = typer.Option(False, "--human-assist", help="Expose a local status page while waiting for manual CAPTCHA/SSO checks."),
+    human_assist: bool = typer.Option(True, "--human-assist/--no-human-assist", help="Expose a local status page while waiting for manual CAPTCHA/SSO checks."),
     human_assist_host: str = typer.Option("127.0.0.1", "--human-assist-host", help="Host for the human-assist status page. Use 0.0.0.0 only on trusted LANs."),
     human_assist_port: int = typer.Option(0, "--human-assist-port", help="Port for the human-assist status page. Zero picks a free port."),
+    disable_browser_extensions: bool = typer.Option(False, "--disable-browser-extensions", help="Temporarily run CloakBrowser without configured extensions, useful for OpenCLI Bridge A/B tests."),
 ):
     """Download a DOI list through a named publisher profile and CloakBrowser."""
     from .publisher_batch import PaperRecord, PublisherBatchDownloader
@@ -735,11 +916,7 @@ def publisher_batch(
         console.print(f"[red]File not found: {file}[/red]")
         raise typer.Exit(1)
 
-    records = [
-        PaperRecord(doi=line.strip())
-        for line in file.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
+    records = [PaperRecord(doi=doi) for doi in _read_doi_lines(file)]
     if not records:
         console.print("[yellow]No DOIs found in file.[/yellow]")
         raise typer.Exit(0)
@@ -755,40 +932,69 @@ def publisher_batch(
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
+    if overnight:
+        login_timeout, broker, broker_ttl, speed_mode, concurrency = _apply_overnight_mode(
+            login_timeout=login_timeout,
+            broker=broker,
+            broker_ttl=broker_ttl,
+            speed_mode=speed_mode,
+            concurrency=concurrency,
+        )
     effective_concurrency = _effective_browser_concurrency(speed_mode, concurrency)
 
     cfg = Config.load()
     if browser_profile:
         cfg.chrome_profile_dir = browser_profile
+    if disable_browser_extensions:
+        _disable_browser_extensions(cfg)
+        if broker:
+            console.print("[yellow]Session broker disabled so the extension-off A/B run cannot reload extensions from global config.[/yellow]")
+            broker = False
+        if overnight:
+            console.print("[yellow]Overnight mode disabled for this extension-off one-shot run.[/yellow]")
+            overnight = False
     institution = _resolve_subscription_institution(cfg, institution)
     profile_key = _publisher_profile_key(profile)
     run_dir = Path(output) if output else Path("downloads") / f"{profile_key}_{len(records)}" / f"cloak_{datetime.now():%Y%m%d_%H%M%S}"
+    if keep_browser_open and broker:
+        console.print("[dim]Session broker already keeps the publisher CloakBrowser alive after this command returns.[/dim]")
+        keep_browser_open = False
+    if keep_browser_open and effective_concurrency > 1:
+        console.print("[yellow]--keep-browser-open keeps a single one-shot browser context; browser workers capped at 1.[/yellow]")
+        effective_concurrency = 1
     console.print(f"[bold]Publisher profile:[/bold] {profile.name}")
     console.print(f"[bold]Found {len(records)} DOI records.[/bold]")
     console.print(f"[bold]Output:[/bold] {run_dir}")
     console.print(f"[bold]Browser profile:[/bold] {cfg.chrome_profile_dir}")
+    console.print(f"[bold]Browser extensions:[/bold] {cfg.browser_extension_dirs or '(disabled/not configured)'}")
     console.print(f"[bold]Speed:[/bold] {speed_mode} (browser workers: {effective_concurrency})")
-    _print_speed_notice(speed_mode, concurrency, effective_concurrency)
+    if overnight:
+        _print_overnight_notice(login_timeout, broker_ttl)
+    _print_speed_notice(speed_mode, concurrency, effective_concurrency, broker=broker)
     console.print("[dim]If a CloakBrowser window stops on SSO or 2FA, complete it there and leave the window open.[/dim]")
 
-    downloader = PublisherBatchDownloader(
-        cfg,
+    summary = _run_papers_group(
+        cfg=cfg,
         profile=profile,
-        institution_query=institution,
-        login_timeout_sec=login_timeout,
-        pdf_timeout_sec=pdf_timeout,
-        human_assist=human_assist,
-        human_assist_host=human_assist_host,
-        human_assist_port=human_assist_port,
-    )
-    summary = downloader.run_records(
-        records,
-        run_dir,
+        publisher_key=profile_key,
+        records=records,
+        run_dir=run_dir,
+        institution=institution,
+        login_timeout=login_timeout,
+        pdf_timeout=pdf_timeout,
+        post_login_hold=post_login_hold,
+        post_run_hold=post_run_hold,
         retry_failed=retry_failed,
+        concurrency=effective_concurrency,
+        broker=broker,
+        broker_ttl=broker_ttl,
         target_verified=target_verified or None,
         attempt_cache=attempt_cache or None,
         skip_attempted=skip_attempted,
-        concurrency=effective_concurrency,
+        keep_browser_open=keep_browser_open,
+        human_assist=human_assist,
+        human_assist_host=human_assist_host,
+        human_assist_port=human_assist_port,
     )
     _print_download_summary(summary, include_attempt_cache=True)
     if summary["missing"] or summary.get("unverified", 0):
@@ -803,18 +1009,20 @@ def papers(
     output: str = typer.Option("", "--output", "-o", help="Run output directory."),
     browser_profile: str = typer.Option("", "--browser-profile", help="Override the persistent CloakBrowser profile directory."),
     institution: str = typer.Option("", "--institution", help="Subscription institution search text. Omit to use configured institution or prompt."),
-    login_timeout: int = typer.Option(900, "--login-timeout", help="Seconds to wait for manual SSO/CAPTCHA completion."),
+    login_timeout: int = typer.Option(DEFAULT_LOGIN_TIMEOUT_SECONDS, "--login-timeout", help="Seconds to wait for manual SSO/CAPTCHA completion."),
     pdf_timeout: int = typer.Option(90, "--pdf-timeout", help="Seconds to wait for each PDF navigation."),
     post_login_hold: int = typer.Option(0, "--post-login-hold", help="Seconds to keep the authorized article page open before PDF capture."),
     post_run_hold: int = typer.Option(0, "--post-run-hold", help="Seconds to keep the browser page open after capture or failure."),
     retry_failed: bool = typer.Option(True, "--retry/--no-retry", help="Retry transient failures in a fresh browser context."),
-    speed: str = typer.Option("balanced", "--speed", help="Speed preset: careful/balanced reuse one broker browser; fast permits up to 2 fallback workers."),
+    speed: str = typer.Option(DEFAULT_BROWSER_SPEED, "--speed", help="Speed preset: careful/balanced reuse one broker browser; fast permits up to 2 fallback workers."),
     concurrency: int = typer.Option(1, "--concurrency", "-j", min=1, max=4, help="Requested browser workers. Broker mode stays single-context; only --speed fast uses more than one fallback worker."),
     broker: bool = typer.Option(True, "--broker/--no-broker", help="Use the long-lived publisher session broker by default."),
-    broker_ttl: int = typer.Option(86400, "--broker-ttl", help="Seconds to keep an auto-started broker alive."),
-    human_assist: bool = typer.Option(False, "--human-assist", help="Expose a local status page while waiting for manual CAPTCHA/SSO checks."),
+    broker_ttl: int = typer.Option(DEFAULT_BROKER_TTL_SECONDS, "--broker-ttl", help="Seconds to keep an auto-started broker alive."),
+    overnight: bool = typer.Option(False, "--overnight", help="Compatibility flag: long-lived broker defaults are already enabled; also forces careful single-context settings."),
+    human_assist: bool = typer.Option(True, "--human-assist/--no-human-assist", help="Expose a local status page while waiting for manual CAPTCHA/SSO checks."),
     human_assist_host: str = typer.Option("127.0.0.1", "--human-assist-host", help="Host for the human-assist status page. Use 0.0.0.0 only on trusted LANs."),
     human_assist_port: int = typer.Option(0, "--human-assist-port", help="Port for the human-assist status page. Zero picks a free port."),
+    disable_browser_extensions: bool = typer.Option(False, "--disable-browser-extensions", help="Temporarily run one-shot CloakBrowser without configured extensions, useful for OpenCLI Bridge A/B tests."),
 ):
     """Recommended browser workflow for closed-access publisher PDFs."""
     from .publisher_batch import PaperRecord
@@ -823,11 +1031,7 @@ def papers(
         console.print(f"[red]File not found: {file}[/red]")
         raise typer.Exit(1)
 
-    records = [
-        PaperRecord(doi=line.strip())
-        for line in file.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
+    records = [PaperRecord(doi=doi) for doi in _read_doi_lines(file)]
     if not records:
         console.print("[yellow]No DOIs found in file.[/yellow]")
         raise typer.Exit(0)
@@ -837,6 +1041,14 @@ def papers(
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
+    if overnight:
+        login_timeout, broker, broker_ttl, speed_mode, concurrency = _apply_overnight_mode(
+            login_timeout=login_timeout,
+            broker=broker,
+            broker_ttl=broker_ttl,
+            speed_mode=speed_mode,
+            concurrency=concurrency,
+        )
     effective_concurrency = _effective_browser_concurrency(speed_mode, concurrency)
 
     try:
@@ -848,6 +1060,14 @@ def papers(
     cfg = Config.load()
     if browser_profile:
         cfg.chrome_profile_dir = browser_profile
+    if disable_browser_extensions:
+        _disable_browser_extensions(cfg)
+        if broker:
+            console.print("[yellow]Session broker disabled so the extension-off A/B run cannot reload extensions from global config.[/yellow]")
+            broker = False
+        if overnight:
+            console.print("[yellow]Overnight mode disabled for this extension-off one-shot run.[/yellow]")
+            overnight = False
     institution = _resolve_subscription_institution(cfg, institution)
 
     multi_publisher = len(publisher_groups) > 1
@@ -865,7 +1085,10 @@ def papers(
         console.print(f"[bold]Publisher groups:[/bold] {group_labels}")
     console.print(f"[bold]Output:[/bold] {run_dir}")
     console.print(f"[bold]Browser profile:[/bold] {cfg.chrome_profile_dir}")
+    console.print(f"[bold]Browser extensions:[/bold] {cfg.browser_extension_dirs or '(disabled/not configured)'}")
     console.print(f"[bold]Speed:[/bold] {speed_mode} (fallback browser workers: {effective_concurrency})")
+    if overnight:
+        _print_overnight_notice(login_timeout, broker_ttl)
     _print_speed_notice(speed_mode, concurrency, effective_concurrency, broker=broker)
 
     group_summaries: list[tuple[str, str, Path, dict]] = []
@@ -937,32 +1160,206 @@ def papers(
 @app.command("session-broker-status")
 def session_broker_status(
     publisher: str = typer.Option("elsevier", "--publisher", "-p", help="Publisher broker key."),
+    json_output: bool = typer.Option(False, "--json", help="Print broker inventory as JSON."),
 ):
     """Show a long-lived publisher browser session broker."""
     from . import session_broker
 
     state = session_broker.load_broker_state(publisher)
     running = session_broker.broker_is_running(publisher)
+    queued_jobs = session_broker.list_queued_jobs(publisher)
+    paused_jobs = session_broker.list_paused_jobs(publisher)
+    if json_output:
+        payload = _session_broker_status_payload(
+            publisher=publisher,
+            state=state,
+            running=running,
+            queued_jobs=queued_jobs,
+            paused_jobs=paused_jobs,
+        )
+        console.print_json(json.dumps(payload, ensure_ascii=False))
+        return
+
     table = Table(title="InstSci Session Broker")
     table.add_column("Publisher")
     table.add_column("Status")
+    table.add_column("Broker state")
     table.add_column("PID")
+    table.add_column("Institution", overflow="fold")
     table.add_column("Profile", overflow="fold")
     table.add_column("Browser proxy", overflow="fold")
+    table.add_column("Extensions", overflow="fold")
+    table.add_column("Active job", overflow="fold")
+    table.add_column("Paused job", overflow="fold")
+    table.add_column("Health", overflow="fold")
+    table.add_column("Last job", overflow="fold")
     table.add_column("Queue", overflow="fold")
+    extension_label = ""
+    broker_status = str(state.get("status", "") or "") if state else ""
+    active_job = ""
+    paused_job = ""
+    health = ""
+    last_job = ""
+    if state:
+        extension_hash = str(state.get("browser_extension_hash", "") or "")
+        try:
+            extension_count = int(state.get("browser_extension_count") or 0)
+        except (TypeError, ValueError):
+            extension_count = 0
+        extension_label = "none" if not extension_count and not extension_hash else str(extension_count)
+        if extension_hash:
+            extension_label = f"{extension_label} ({extension_hash[:12]})"
+        active_job_id = str(state.get("active_job_id", "") or "")
+        active_count = str(state.get("active_record_count", "") or "")
+        active_job = f"{active_job_id} ({active_count})" if active_job_id else ""
+        paused_job_id = str(state.get("paused_job_id", "") or "")
+        paused_count = str(state.get("paused_record_count", "") or "")
+        paused_job = f"{paused_job_id} ({paused_count})" if paused_job_id else ""
+        last_health_status = str(state.get("last_health_status", "") or "")
+        last_health_at = str(state.get("last_health_at", "") or "")
+        health = f"{last_health_status} ({last_health_at})" if last_health_status else ""
+        last_job_id = str(state.get("last_job_id", "") or "")
+        last_job_status = str(state.get("last_job_status", "") or "")
+        last_job = f"{last_job_id} ({last_job_status})" if last_job_id else ""
     table.add_row(
         publisher,
         "running" if running else "stopped",
+        broker_status,
         str(state.get("pid", "")) if state else "",
+        str(state.get("institution", "")) if state else "",
         str(state.get("profile_dir", "")) if state else "",
         str(state.get("browser_proxy_url", "")) if state else "",
+        extension_label,
+        active_job,
+        paused_job,
+        health,
+        last_job,
         str(state.get("queue_dir", "")) if state else "",
     )
     console.print(table)
+    console.print(f"[dim]Process status: {'running' if running else 'stopped'}[/dim]")
+    if state and state.get("institution"):
+        console.print(f"[dim]Institution: {state['institution']}[/dim]")
     if state and state.get("browser_proxy_url"):
         console.print(f"[dim]Browser proxy: {state['browser_proxy_url']}[/dim]")
+    if state and extension_label and extension_label != "none":
+        console.print(f"[dim]Browser extensions: {extension_label}[/dim]")
     if state and state.get("human_assist_url"):
         console.print(f"[dim]Human assist: {state['human_assist_url']}[/dim]")
+    if state and state.get("status"):
+        console.print(f"[dim]Broker state: {state['status']}[/dim]")
+    if state and state.get("active_job_id"):
+        console.print(
+            f"[dim]Active job: {state['active_job_id']} "
+            f"({state.get('active_record_count') or 0} records)[/dim]"
+        )
+    if state and state.get("active_output_dir"):
+        console.print(f"[dim]Active output: {state['active_output_dir']}[/dim]")
+    if state and state.get("paused_job_id"):
+        console.print(
+            f"[dim]Paused job: {state['paused_job_id']} "
+            f"({state.get('paused_record_count') or 0} records)[/dim]"
+        )
+        console.print(
+            f"[dim]Resume: instsci session-broker-resume -p {publisher} "
+            f"--job-id {state['paused_job_id']}[/dim]"
+        )
+    if state and state.get("paused_job_path"):
+        console.print(f"[dim]Paused job file: {state['paused_job_path']}[/dim]")
+    if queued_jobs:
+        console.print(f"[dim]Queued jobs: {len(queued_jobs)}[/dim]")
+        for queued in queued_jobs[:10]:
+            console.print(
+                f"[dim]  - {queued['job_id']} "
+                f"({queued.get('record_count') or 0} records) "
+                f"{queued.get('created_at', '')} {queued.get('output_dir', '')}[/dim]"
+            )
+    if paused_jobs:
+        console.print(f"[dim]Paused jobs: {len(paused_jobs)}[/dim]")
+        for paused in paused_jobs[:10]:
+            console.print(
+                f"[dim]  - {paused['job_id']} "
+                f"({paused.get('record_count') or 0} records) "
+                f"{paused.get('paused_at', '')} {paused.get('pause_reason', '')}[/dim]"
+            )
+    if state and state.get("last_health_status"):
+        console.print(
+            f"[dim]Last health: {state['last_health_status']} "
+            f"at {state.get('last_health_at', '')}[/dim]"
+        )
+    if state and state.get("last_health_url"):
+        console.print(f"[dim]Health URL: {state['last_health_url']}[/dim]")
+    if state and state.get("last_health_error"):
+        console.print(f"[dim]Health detail: {state['last_health_error']}[/dim]")
+    if state and state.get("keepalive_interval_seconds"):
+        console.print(f"[dim]Keepalive interval: {state['keepalive_interval_seconds']}s[/dim]")
+    if state and state.get("last_job_id"):
+        console.print(f"[dim]Last job: {state['last_job_id']} ({state.get('last_job_status', '')})[/dim]")
+    if state and state.get("last_summary_path"):
+        console.print(f"[dim]Last summary: {state['last_summary_path']}[/dim]")
+    if state and state.get("last_error"):
+        console.print(f"[yellow]Last attention: {state['last_error']}[/yellow]")
+
+
+def _session_broker_status_payload(
+    *,
+    publisher: str,
+    state: dict | None,
+    running: bool,
+    queued_jobs: list[dict],
+    paused_jobs: list[dict],
+) -> dict:
+    state = state or {}
+    paused_job_id = str(state.get("paused_job_id") or "")
+    resume_command = (
+        f"instsci session-broker-resume -p {publisher} --job-id {paused_job_id}"
+        if paused_job_id
+        else ""
+    )
+    return {
+        "publisher": publisher,
+        "running": bool(running),
+        "status": str(state.get("status") or ""),
+        "pid": int(state.get("pid") or 0),
+        "started_at": str(state.get("started_at") or ""),
+        "ttl_seconds": int(state.get("ttl_seconds") or 0),
+        "institution": str(state.get("institution") or ""),
+        "profile_dir": str(state.get("profile_dir") or ""),
+        "browser_proxy": str(state.get("browser_proxy_url") or ""),
+        "browser_proxy_hash": str(state.get("browser_proxy_url_hash") or ""),
+        "browser_extensions": {
+            "count": int(state.get("browser_extension_count") or 0),
+            "hash": str(state.get("browser_extension_hash") or ""),
+        },
+        "human_assist_url": str(state.get("human_assist_url") or ""),
+        "active_job": {
+            "job_id": str(state.get("active_job_id") or ""),
+            "output_dir": str(state.get("active_output_dir") or ""),
+            "record_count": int(state.get("active_record_count") or 0),
+        },
+        "paused_job": {
+            "job_id": paused_job_id,
+            "path": str(state.get("paused_job_path") or ""),
+            "record_count": int(state.get("paused_record_count") or 0),
+        },
+        "queued_jobs": queued_jobs,
+        "paused_jobs": paused_jobs,
+        "resume_command": resume_command,
+        "health": {
+            "status": str(state.get("last_health_status") or ""),
+            "checked_at": str(state.get("last_health_at") or ""),
+            "url": str(state.get("last_health_url") or ""),
+            "reason": str(state.get("last_health_error") or ""),
+            "keepalive_interval_seconds": int(state.get("keepalive_interval_seconds") or 0),
+        },
+        "last_job": {
+            "job_id": str(state.get("last_job_id") or ""),
+            "status": str(state.get("last_job_status") or ""),
+            "summary_path": str(state.get("last_summary_path") or ""),
+            "attention": str(state.get("last_error") or ""),
+        },
+        "queue_dir": str(state.get("queue_dir") or ""),
+    }
 
 
 @app.command("session-broker-stop")
@@ -977,12 +1374,48 @@ def session_broker_stop(
     console.print(f"[green]Stop requested for broker:[/green] {publisher}")
 
 
+@app.command("session-broker-resume")
+def session_broker_resume(
+    publisher: str = typer.Option("elsevier", "--publisher", "-p", help="Publisher broker key."),
+    job_id: str = typer.Option("", "--job-id", help="Paused broker job id. Omit to resume the newest paused job."),
+    resume_all: bool = typer.Option(False, "--all/--latest", help="Resume all paused jobs for this publisher."),
+    timeout: int = typer.Option(DEFAULT_LOGIN_TIMEOUT_SECONDS, "--timeout", help="Seconds to wait for the resumed broker job."),
+):
+    """Resume a broker job paused for manual institution re-authentication."""
+    from . import session_broker
+
+    try:
+        if resume_all:
+            summary = session_broker.resume_all_broker_jobs(
+                publisher=publisher,
+                timeout_seconds=timeout,
+            )
+        else:
+            summary = session_broker.resume_broker_job(
+                publisher=publisher,
+                job_id=job_id,
+                timeout_seconds=timeout,
+            )
+    except Exception as exc:
+        console.print(f"[red]Could not resume broker job:[/red] {type(exc).__name__}: {exc}")
+        raise typer.Exit(1) from exc
+
+    console.print(f"[green]Session broker job resumed:[/green] {publisher}")
+    if summary.get("resumed_job_count"):
+        console.print(f"[dim]Resumed {summary['resumed_job_count']} paused jobs.[/dim]")
+    _print_download_summary(summary, include_attempt_cache=True)
+    if summary.get("missing") or summary.get("unverified", 0):
+        console.print("[yellow]Some items still need manual attention; keep CloakBrowser open and resume again after completing the prompt.[/yellow]")
+        raise typer.Exit(2)
+
+
 @app.command("session-broker-run", hidden=True)
 def session_broker_run(
     publisher: str = typer.Option(..., "--publisher", "-p"),
     browser_profile: str = typer.Option("", "--browser-profile"),
     institution: str = typer.Option("", "--institution"),
-    ttl: int = typer.Option(86400, "--ttl"),
+    ttl: int = typer.Option(DEFAULT_BROKER_TTL_SECONDS, "--ttl"),
+    keepalive_interval: int = typer.Option(DEFAULT_KEEPALIVE_INTERVAL_SECONDS, "--keepalive-interval"),
     human_assist: bool = typer.Option(False, "--human-assist"),
     human_assist_host: str = typer.Option("127.0.0.1", "--human-assist-host"),
     human_assist_port: int = typer.Option(0, "--human-assist-port"),
@@ -990,14 +1423,26 @@ def session_broker_run(
     """Run the long-lived broker loop. Internal command."""
     from .publisher_batch import PaperRecord, PublisherBatchDownloader
     from .publisher_profiles import get_publisher_profile
-    from .session_broker import BrokerState, broker_dir, broker_stop_path, write_broker_state
+    from .session_broker import (
+        BrokerState,
+        broker_dir,
+        broker_stop_path,
+        broker_summary_status,
+        pause_broker_job,
+        write_broker_state,
+    )
 
     cfg = Config.load()
     if browser_profile:
         cfg.chrome_profile_dir = browser_profile
     institution = _resolve_subscription_institution(cfg, institution, prompt=False)
     profile = get_publisher_profile(publisher)
-    from .browser_identity import browser_proxy_hash, mask_secret_url
+    from .browser_identity import (
+        browser_extension_hash,
+        browser_extension_paths,
+        browser_proxy_hash,
+        mask_secret_url,
+    )
     root = broker_dir(publisher)
     queue_dir = root / "queue"
     queue_dir.mkdir(parents=True, exist_ok=True)
@@ -1008,16 +1453,20 @@ def session_broker_run(
         queue_dir=str(queue_dir),
         started_at=datetime.now().isoformat(timespec="seconds"),
         ttl_seconds=ttl,
+        institution=institution,
         heartbeat_at=datetime.now().isoformat(timespec="seconds"),
         browser_proxy_url=mask_secret_url(cfg.browser_proxy_url),
         browser_proxy_url_hash=browser_proxy_hash(cfg),
+        browser_extension_count=len(browser_extension_paths(cfg)),
+        browser_extension_hash=browser_extension_hash(cfg),
+        keepalive_interval_seconds=max(0, int(keepalive_interval or 0)),
     )
     write_broker_state(state)
     downloader = PublisherBatchDownloader(
         cfg,
         profile=profile,
         institution_query=institution,
-        login_timeout_sec=900,
+        login_timeout_sec=DEFAULT_LOGIN_TIMEOUT_SECONDS,
         pdf_timeout_sec=90,
         human_assist=human_assist,
         human_assist_host=human_assist_host,
@@ -1028,62 +1477,174 @@ def session_broker_run(
         state.human_assist_url = downloader.human_assist_url
         write_broker_state(state)
     context = downloader._launch_context()
+    state.status = "idle"
+    write_broker_state(state)
     deadline = time.time() + max(1, ttl)
+    next_keepalive_at = time.time() + max(0, int(keepalive_interval or 0))
     try:
         while time.time() < deadline and not broker_stop_path(publisher).exists():
             state.heartbeat_at = datetime.now().isoformat(timespec="seconds")
             write_broker_state(state)
             jobs = sorted(queue_dir.glob("*.json"))
+            processed_job = False
             for job_path in jobs:
                 if job_path.name.endswith(".done.json"):
                     continue
+                processed_job = True
                 try:
                     job = json.loads(job_path.read_text(encoding="utf-8"))
                     run_dir = Path(str(job["output_dir"]))
-                    primary_dir = run_dir / "primary"
-                    primary_dir.mkdir(parents=True, exist_ok=True)
+                    records_payload = job.get("records", [])
+                    state.status = "processing"
+                    state.active_job_id = str(job.get("id") or job_path.stem)
+                    state.active_output_dir = str(run_dir)
+                    state.active_record_count = len(records_payload) if isinstance(records_payload, list) else 0
+                    state.last_error = ""
+                    state.heartbeat_at = datetime.now().isoformat(timespec="seconds")
+                    write_broker_state(state)
                     job_downloader = PublisherBatchDownloader(
                         cfg,
                         profile=profile,
                         institution_query=str(job.get("institution") or institution),
-                        login_timeout_sec=int(job.get("login_timeout") or 900),
+                        login_timeout_sec=int(job.get("login_timeout") or DEFAULT_LOGIN_TIMEOUT_SECONDS),
                         pdf_timeout_sec=int(job.get("pdf_timeout") or 90),
                         post_login_hold_sec=int(job.get("post_login_hold") or 0),
                         post_run_hold_sec=int(job.get("post_run_hold") or 0),
                     )
                     job_downloader.share_human_assist_from(downloader)
-                    records = [PaperRecord(**record) for record in job.get("records", [])]
-                    results = []
-                    for record in records:
-                        results.append(job_downloader.fetch_one(context, record, primary_dir))
-                        job_downloader._write_results(primary_dir / "summary_partial.json", results)
-                    job_downloader._write_results(primary_dir / "summary.json", results)
-                    summary = job_downloader._write_complete_artifacts(records, results, run_dir)
-                    summary["publisher"] = profile.name
+                    records = [PaperRecord(**record) for record in records_payload]
+                    target_verified = int(job.get("target_verified") or 0)
+                    summary = job_downloader.run_records_in_context(
+                        context,
+                        records,
+                        run_dir,
+                        retry_failed=bool(job.get("retry_failed", True)),
+                        target_verified=target_verified or None,
+                        attempt_cache=str(job.get("attempt_cache") or "") or None,
+                        skip_attempted=bool(job.get("skip_attempted") or False),
+                    )
                     summary["broker"] = True
                     summary["browser_profile_dir"] = cfg.chrome_profile_dir
+                    job_downloader._add_browser_extension_summary(summary)
                     if job_downloader.human_assist_url:
                         summary["human_assist_url"] = job_downloader.human_assist_url
-                    (run_dir / "summary.json").write_text(
+                    job_status = broker_summary_status(summary)
+                    summary["broker_status"] = job_status
+                    if job_status == "reauth_required":
+                        paused = pause_broker_job(publisher, job, summary)
+                        summary["paused_job_id"] = paused["job_id"]
+                        summary["paused_job_path"] = paused["path"]
+                        summary["paused_record_count"] = paused["record_count"]
+                        summary["resume_command"] = (
+                            f"instsci session-broker-resume -p {publisher} "
+                            f"--job-id {paused['job_id']}"
+                        )
+                    summary_path = run_dir / "summary.json"
+                    summary_path.write_text(
                         json.dumps(summary, ensure_ascii=False, indent=2),
                         encoding="utf-8",
                     )
+                    if job_status == "reauth_required" and summary.get("resume_command"):
+                        job_downloader.publish_resume_handoff(
+                            run_dir,
+                            status="reauth_required",
+                            resume_command=str(summary.get("resume_command") or ""),
+                            paused_job_id=str(summary.get("paused_job_id") or ""),
+                            paused_record_count=int(summary.get("paused_record_count") or 0),
+                            summary_path=str(summary_path),
+                        )
+                    state.status = "idle" if job_status == "complete" else job_status
+                    state.active_job_id = ""
+                    state.active_output_dir = ""
+                    state.active_record_count = 0
+                    state.last_job_id = str(job.get("id") or job_path.stem)
+                    state.last_job_status = job_status
+                    state.last_summary_path = str(summary_path)
+                    state.last_error = _broker_attention_message(summary) if job_status != "complete" else ""
+                    if job_status == "reauth_required":
+                        state.paused_job_id = str(summary.get("paused_job_id") or "")
+                        state.paused_job_path = str(summary.get("paused_job_path") or "")
+                        state.paused_record_count = int(summary.get("paused_record_count") or 0)
+                    elif job_status == "complete":
+                        state.paused_job_id = ""
+                        state.paused_job_path = ""
+                        state.paused_record_count = 0
+                    state.heartbeat_at = datetime.now().isoformat(timespec="seconds")
+                    write_broker_state(state)
                     (queue_dir / f"{job['id']}.done.json").write_text(
                         json.dumps(summary, ensure_ascii=False, indent=2),
                         encoding="utf-8",
                     )
                 except Exception as exc:
                     payload = {"count": 0, "success": 0, "missing": 1, "unverified": 0, "error": f"{type(exc).__name__}: {exc}"}
+                    state.status = "error"
+                    state.active_job_id = ""
+                    state.active_output_dir = ""
+                    state.active_record_count = 0
+                    state.last_job_id = job_path.stem
+                    state.last_job_status = "error"
+                    state.last_error = str(payload["error"])
+                    state.heartbeat_at = datetime.now().isoformat(timespec="seconds")
+                    write_broker_state(state)
                     done_name = f"{job_path.stem}.done.json"
                     (queue_dir / done_name).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
                 finally:
                     job_path.unlink(missing_ok=True)
+            if (
+                not processed_job
+                and keepalive_interval
+                and keepalive_interval > 0
+                and time.time() >= next_keepalive_at
+            ):
+                health = downloader.check_session_health(context)
+                state.last_health_status = str(health.get("status") or "")
+                state.last_health_at = str(health.get("checked_at") or datetime.now().isoformat(timespec="seconds"))
+                state.last_health_url = str(health.get("url") or "")
+                state.last_health_error = str(health.get("reason") or "")
+                state.heartbeat_at = datetime.now().isoformat(timespec="seconds")
+                if state.last_health_status == "reauth_required":
+                    state.status = "reauth_required"
+                    state.last_error = (
+                        "Publisher session health check requires manual re-authentication. "
+                        "Complete the visible CloakBrowser prompt before submitting more work."
+                    )
+                    downloader.publish_resume_handoff(
+                        root,
+                        status="reauth_required",
+                        resume_command=f"instsci session-broker-status -p {publisher}",
+                        summary_path=str(root / "state.json"),
+                    )
+                elif state.status == "reauth_required" and not state.paused_job_id:
+                    state.status = "idle"
+                    state.last_error = ""
+                write_broker_state(state)
+                next_keepalive_at = time.time() + max(1, int(keepalive_interval))
             time.sleep(2)
     finally:
         try:
             context.close()
         except Exception:
             pass
+
+
+def _broker_attention_message(summary: dict) -> str:
+    if summary.get("error"):
+        return str(summary.get("error") or "")
+    missing = int(summary.get("missing") or 0)
+    unverified = int(summary.get("unverified") or 0)
+    if summary.get("broker_status") == "reauth_required":
+        resume = str(summary.get("resume_command") or "").strip()
+        suffix = f" Then run: {resume}" if resume else " Then run instsci session-broker-resume for this publisher."
+        return (
+            f"{missing} missing and {unverified} unverified PDFs after an institution/CAPTCHA/login checkpoint. "
+            f"Complete the visible CloakBrowser prompt and leave the browser open.{suffix}"
+        )
+    if missing or unverified:
+        return (
+            f"{missing} missing and {unverified} unverified PDFs. "
+            "Complete any visible SSO/CAPTCHA/institution prompt in CloakBrowser, then rerun with the same profile."
+        )
+    return ""
 
 
 @app.command("session-doctor")
@@ -1532,6 +2093,97 @@ def config_cmd(
         console.print(f"  Output dir:        {cfg.output_dir}")
         console.print(f"  Cache dir:         {cfg.cache_dir}")
         console.print(f"  Cookie path:       {cfg.cookie_path}")
+
+
+@app.command("opencli-bridge-doctor")
+def opencli_bridge_doctor(
+    runtime_probe: bool = typer.Option(False, "--runtime-probe", help="Launch a temporary CloakBrowser and read the OpenCLI extension popup status."),
+    use_config_profile: bool = typer.Option(False, "--use-config-profile", help="Use the configured CloakBrowser profile for the runtime probe instead of a temporary profile."),
+    keep_open: bool = typer.Option(False, "--keep-open", help="Keep the runtime-probe CloakBrowser window open."),
+    timeout: float = typer.Option(15.0, "--timeout", min=3.0, max=120.0, help="Runtime probe timeout in seconds."),
+    output: str = typer.Option("", "--output", "-o", help="Write diagnostics JSON to this path."),
+    json_output: bool = typer.Option(False, "--json", help="Print diagnostics as JSON."),
+):
+    """Diagnose whether the OpenCLI Browser Bridge is configured and connected."""
+    from .opencli_bridge import build_opencli_bridge_diagnostics
+
+    cfg = Config.load()
+    diagnostics = build_opencli_bridge_diagnostics(
+        cfg,
+        runtime_probe=runtime_probe,
+        use_config_profile=use_config_profile,
+        timeout_sec=timeout,
+        keep_open=keep_open,
+    )
+    if output:
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(diagnostics, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    if json_output:
+        console.print_json(json.dumps(diagnostics, ensure_ascii=False))
+        return
+
+    table = Table(title="OpenCLI Browser Bridge Doctor")
+    table.add_column("Check", width=24)
+    table.add_column("Status", width=18)
+    table.add_column("Detail", overflow="fold")
+
+    table.add_row(
+        "Configured extensions",
+        str(diagnostics["configured_extension_count"]),
+        cfg.browser_extension_dirs or "(not configured)",
+    )
+    extensions = diagnostics.get("extensions", [])
+    for index, info in enumerate(extensions, start=1):
+        status = "ok" if info.get("manifest_ok") and info.get("required_permissions_present") else "check"
+        detail = (
+            f"{info.get('name') or '(unknown)'} {info.get('version') or ''}; "
+            f"daemon={info.get('daemon_host')}:{info.get('daemon_port')}; "
+            f"actions={', '.join(info.get('command_actions') or []) or '(none parsed)'}"
+        )
+        if info.get("error"):
+            detail += f"; error={info['error']}"
+        table.add_row(f"Extension {index}", status, detail)
+
+    daemon = diagnostics.get("daemon", {})
+    daemon_status = "connected" if daemon.get("extension_connected") else ("up" if daemon.get("ping_ok") else "down")
+    table.add_row(
+        "OpenCLI daemon",
+        daemon_status,
+        (
+            f"port={daemon.get('port')}; daemon={daemon.get('daemon_version') or '(unknown)'}; "
+            f"extension={daemon.get('extension_version') or '(not connected)'}; "
+            f"context={daemon.get('context_id') or '(none)'}; "
+            f"profiles={len(daemon.get('profiles') or [])}"
+        ),
+    )
+
+    runtime = diagnostics.get("runtime_probe")
+    if isinstance(runtime, dict):
+        runtime_status = "connected" if runtime.get("connected") else ("launched" if runtime.get("launched") else "not launched")
+        table.add_row(
+            "Runtime probe",
+            runtime_status,
+            (
+                f"profile={runtime.get('profile')}; extension_id={runtime.get('extension_id') or '(none)'}; "
+                f"popup={runtime.get('popup_status_text') or '(none)'}; "
+                f"context={runtime.get('popup_context_id') or '(none)'}; "
+                f"registered={runtime.get('daemon_profile_registered')}; "
+                f"error={runtime.get('error') or '(none)'}"
+            ),
+        )
+    else:
+        table.add_row("Runtime probe", "skipped", "Pass --runtime-probe to launch a temporary CloakBrowser.")
+
+    table.add_row("Verdict", diagnostics.get("verdict", ""), output_path_text(output))
+    console.print(table)
+    if output:
+        console.print(f"[dim]Diagnostics written to: {output}[/dim]")
+
+
+def output_path_text(output: str) -> str:
+    return f"json={output}" if output else ""
 
 
 def _run_federated_login(

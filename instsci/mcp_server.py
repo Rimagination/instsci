@@ -4,12 +4,12 @@ import asyncio
 import json
 import logging
 import sys
-from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from .config import Config
+from .download_defaults import DEFAULT_BROWSER_SPEED
 from .fetcher import PaperFetcher
 from .publisher_access import (
     load_institutional_identity_policy,
@@ -267,7 +267,7 @@ async def plan_publisher_pdf_workflow(
     publisher: str = "auto",
     institution: str = "",
     output: str = "runs/papers",
-    speed: str = "balanced",
+    speed: str = DEFAULT_BROWSER_SPEED,
     concurrency: int = 1,
     format: str = "json",
 ) -> str:
@@ -302,13 +302,13 @@ async def plan_publisher_pdf_workflow(
         resolved_institution, institution_source = _institution_from_config(config)
 
     publisher_value = publisher.strip() or "auto"
-    speed_value = (speed or "balanced").strip().lower()
+    speed_value = (speed or DEFAULT_BROWSER_SPEED).strip().lower()
     if speed_value not in {"careful", "balanced", "fast"}:
         payload = {
             "status": "unsupported_speed",
             "speed": speed,
             "known_speeds": ["careful", "balanced", "fast"],
-            "next_action": "Choose careful, balanced, or fast. Balanced keeps one live CloakBrowser context by default.",
+            "next_action": "Choose careful, balanced, or fast. Careful keeps one live CloakBrowser context by default.",
         }
         return _format_plan_markdown(payload) if format.lower() == "markdown" else _json_response(payload)
     try:

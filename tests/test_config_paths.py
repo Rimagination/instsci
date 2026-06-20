@@ -86,6 +86,28 @@ class ConfigPathTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("Supported browser challenge modes", result.output)
 
+    def test_opencli_bridge_doctor_is_exposed(self):
+        runner = CliRunner()
+
+        result = runner.invoke(app, ["opencli-bridge-doctor", "--help"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("--runtime-probe", result.output)
+        self.assertIn("--json", result.output)
+
+    def test_publisher_browser_commands_can_disable_extensions_for_ab_tests(self):
+        runner = CliRunner()
+
+        publisher_result = runner.invoke(app, ["publisher-batch", "--help"])
+        papers_result = runner.invoke(app, ["papers", "--help"])
+
+        self.assertEqual(publisher_result.exit_code, 0, publisher_result.output)
+        self.assertEqual(papers_result.exit_code, 0, papers_result.output)
+        self.assertIn("--disable-brows", publisher_result.output)
+        self.assertIn("--disable-brows", papers_result.output)
+        self.assertIn("OpenCLI Bridge", publisher_result.output)
+        self.assertIn("OpenCLI Bridge", papers_result.output)
+
 
 if __name__ == "__main__":
     unittest.main()

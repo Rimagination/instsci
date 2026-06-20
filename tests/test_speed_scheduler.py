@@ -3,6 +3,9 @@ import unittest
 from typer.testing import CliRunner
 
 from instsci.cli import (
+    OVERNIGHT_BROKER_TTL_SECONDS,
+    OVERNIGHT_LOGIN_TIMEOUT_SECONDS,
+    _apply_overnight_mode,
     _effective_browser_concurrency,
     _group_records_by_publisher,
     app,
@@ -18,6 +21,27 @@ class SpeedSchedulerTests(unittest.TestCase):
     def test_fast_caps_browser_workers(self):
         self.assertEqual(_effective_browser_concurrency("fast", 1), 1)
         self.assertEqual(_effective_browser_concurrency("fast", 4), 2)
+
+    def test_overnight_mode_uses_long_single_context_broker_preset(self):
+        login_timeout, broker, broker_ttl, speed_mode, concurrency = _apply_overnight_mode(
+            login_timeout=900,
+            broker=False,
+            broker_ttl=600,
+            speed_mode="fast",
+            concurrency=4,
+        )
+
+        self.assertEqual(login_timeout, OVERNIGHT_LOGIN_TIMEOUT_SECONDS)
+        self.assertTrue(broker)
+        self.assertEqual(broker_ttl, OVERNIGHT_BROKER_TTL_SECONDS)
+        self.assertEqual(speed_mode, "careful")
+        self.assertEqual(concurrency, 1)
+
+    def test_long_lived_defaults_cover_multiday_persistence(self):
+        three_days = 3 * 24 * 60 * 60
+
+        self.assertGreaterEqual(OVERNIGHT_LOGIN_TIMEOUT_SECONDS, three_days)
+        self.assertGreaterEqual(OVERNIGHT_BROKER_TTL_SECONDS, three_days)
 
     def test_auto_publisher_groups_mixed_dois_without_school_default(self):
         groups = _group_records_by_publisher(
@@ -40,7 +64,9 @@ class SpeedSchedulerTests(unittest.TestCase):
 
         self.assertIn("--speed", publisher_help)
         self.assertIn("--concurrency", publisher_help)
+        self.assertIn("--overnight", publisher_help)
         self.assertIn("--speed", papers_help)
+        self.assertIn("--overnight", papers_help)
 
 
 if __name__ == "__main__":

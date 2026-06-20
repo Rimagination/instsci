@@ -2,7 +2,7 @@
 
 import re
 
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup
 
 
 def extract(html: str, url: str = "") -> dict:
