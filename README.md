@@ -1,4 +1,13 @@
-# InstSci
+<p align="center">
+  <img src="assets/brand/instsci-logo-ai.png" alt="InstSci" width="720">
+</p>
+
+<p align="center">
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/version-0.1.0-blue.svg" alt="Version 0.1.0"></a>
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-%3E%3D3.10-blue.svg" alt="Python >=3.10"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/MCP-compatible-blue.svg" alt="MCP compatible">
+</p>
 
 [中文](#中文) | [English](#english)
 
