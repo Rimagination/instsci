@@ -55,11 +55,12 @@ class AuthCookieStoreTests(unittest.TestCase):
         self.assertIn("Example University", script)
         self.assertNotIn("items[0].click", script)
 
-    def test_carsi_institution_result_script_uses_tsinghua_aliases(self):
-        script = _institution_result_click_script("button", "清华大学")
+    def test_carsi_institution_result_script_uses_explicit_aliases(self):
+        script = _institution_result_click_script("button", "示例大学", ["Example University"])
 
-        self.assertIn("Tsinghua University(OpenAthens)", script)
-        self.assertIn("清华大学", script)
+        self.assertIn("Example University(OpenAthens)", script)
+        self.assertIn("示例大学", script)
+        self.assertNotIn("Tsinghua University", script)
 
     def test_ezproxy_save_preserves_browser_session_cookie(self):
         with TemporaryDirectory() as tmp:

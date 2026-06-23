@@ -61,6 +61,10 @@ instsci elsevier-setup --api-key YOUR_ELSEVIER_KEY --validate
 instsci search "perovskite solar cells" --limit 10
 instsci fetch "10.1038/s41586-020-2649-2"
 instsci papers dois.txt --publisher auto --output ./runs/papers
+instsci papers dois.txt --publisher auto --output ./runs/papers --detach
+instsci jobs status
+instsci jobs tail <job-id>
+instsci jobs resume <job-id>
 ```
 
 MCP：
@@ -129,6 +133,10 @@ instsci elsevier-setup --api-key YOUR_ELSEVIER_KEY --validate
 instsci search "perovskite solar cells" --limit 10
 instsci fetch "10.1038/s41586-020-2649-2"
 instsci papers dois.txt --publisher auto --output ./runs/papers
+instsci papers dois.txt --publisher auto --output ./runs/papers --detach
+instsci jobs status
+instsci jobs tail <job-id>
+instsci jobs resume <job-id>
 ```
 
 MCP:
@@ -140,6 +148,10 @@ instsci-mcp
 ### Access And Compliance
 
 InstSci never asks for your password. When SSO, 2FA, CAPTCHA, or publisher verification appears, complete it manually in the visible CloakBrowser window. HTTP diagnostics are preflight checks only; final publisher PDF availability should come from a visible browser-backed workflow.
+
+Login persistence is local. InstSci reuses the persistent CloakBrowser profile directory and the long-lived publisher broker so cookies, localStorage, IndexedDB, cache, and live browser state can survive normal batch work. It also remembers the latest configured subscription institution name and optional Chinese/English aliases in local config so later closed-access runs do not ask again.
+
+InstSci does not store your institution password, and exported cookie files are not treated as a complete login state. Runtime state such as `config.json`, `cookies.json`, `chrome-profile/`, `carsi_cookies/`, broker queues, and `runs/` output should remain local and is ignored by Git.
 
 ### License
 

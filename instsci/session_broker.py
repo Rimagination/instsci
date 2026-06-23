@@ -163,14 +163,51 @@ def submit_broker_job(
     pdf_timeout: int,
     post_login_hold: int,
     post_run_hold: int,
+    carsi_portal_preauth: bool,
     timeout_seconds: int,
+    institution_aliases: list[str] | None = None,
 ) -> dict[str, Any]:
+    queued = enqueue_broker_job(
+        publisher=publisher,
+        records=records,
+        output_dir=output_dir,
+        institution=institution,
+        institution_aliases=institution_aliases or [],
+        login_timeout=login_timeout,
+        pdf_timeout=pdf_timeout,
+        post_login_hold=post_login_hold,
+        post_run_hold=post_run_hold,
+        carsi_portal_preauth=carsi_portal_preauth,
+    )
+    return wait_for_broker_job(
+        publisher=publisher,
+        job_id=str(queued["id"]),
+        done_path=Path(str(queued["done_path"])),
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def enqueue_broker_job(
+    *,
+    publisher: str,
+    records: list[dict[str, str]],
+    output_dir: str,
+    institution: str,
+    login_timeout: int,
+    pdf_timeout: int,
+    post_login_hold: int,
+    post_run_hold: int,
+    carsi_portal_preauth: bool = False,
+    institution_aliases: list[str] | None = None,
+    job_id: str | None = None,
+) -> dict[str, Any]:
+    """Write a broker queue job without waiting for completion."""
     state = load_broker_state(publisher)
     if not state:
         raise RuntimeError(f"No broker state for {publisher}")
     queue_dir = Path(str(state["queue_dir"]))
     queue_dir.mkdir(parents=True, exist_ok=True)
-    job_id = uuid4().hex
+    job_id = job_id or uuid4().hex
     job_path = queue_dir / f"{job_id}.json"
     done_path = queue_dir / f"{job_id}.done.json"
     job = {
@@ -179,13 +216,33 @@ def submit_broker_job(
         "records": records,
         "output_dir": output_dir,
         "institution": institution,
+        "institution_aliases": list(institution_aliases or []),
         "login_timeout": login_timeout,
         "pdf_timeout": pdf_timeout,
         "post_login_hold": post_login_hold,
         "post_run_hold": post_run_hold,
+        "carsi_portal_preauth": bool(carsi_portal_preauth),
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
     job_path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "id": job_id,
+        "publisher": publisher,
+        "job_path": str(job_path),
+        "done_path": str(done_path),
+        "queue_dir": str(queue_dir),
+        "created_at": job["created_at"],
+    }
+
+
+def wait_for_broker_job(
+    *,
+    publisher: str,
+    job_id: str,
+    done_path: Path,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    """Wait for a queued broker job to finish and return its summary."""
     deadline = time.time() + max(1, timeout_seconds)
     while time.time() < deadline:
         if done_path.exists():

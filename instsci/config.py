@@ -27,6 +27,8 @@ class Config:
     chrome_profile_dir: str = ""
     carsi_enabled: bool = False  # Enable CARSI/Shibboleth federated auth
     carsi_idp_name: str = ""  # University name for CARSI WAYF (e.g. "中国海洋大学")
+    institution_name_zh: str = ""  # User's subscription institution name in Chinese/local form
+    institution_name_en: str = ""  # User's subscription institution name in English form
     carsi_cookie_dir: str = ""  # Per-publisher CARSI cookies
     request_delay_min: float = 2.0
     request_delay_max: float = 5.0

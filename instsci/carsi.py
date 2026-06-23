@@ -27,10 +27,10 @@ logger = logging.getLogger(__name__)
 _PUBLISHER_CONFIGS_FILE = Path(__file__).parent / "data" / "publisher_carsi.json"
 
 
-def _institution_result_click_script(result_selector: str, institution: str) -> str:
+def _institution_result_click_script(result_selector: str, institution: str, extra_aliases: list[str] | None = None) -> str:
     """Build a safe script that clicks only a matching institution result."""
     selector_js = json.dumps(result_selector)
-    aliases_js = json.dumps(institution_aliases(institution), ensure_ascii=False)
+    aliases_js = json.dumps(institution_aliases(institution, extra_aliases or []), ensure_ascii=False)
     return f"""
         (() => {{
             const selector = {selector_js};
@@ -206,7 +206,11 @@ class CARSIClient:
                             page.wait_for_selector(cfg.result_selector, timeout=5000)
                             # Try clicking only a result that matches the configured institution.
                             result_text = page.evaluate(
-                                _institution_result_click_script(cfg.result_selector, self.config.carsi_idp_name)
+                                _institution_result_click_script(
+                                    cfg.result_selector,
+                                    self.config.carsi_idp_name,
+                                    [self.config.institution_name_en, self.config.institution_name_zh, self.config.school],
+                                )
                             )
                             if result_text:
                                 logger.info("Clicked institution: %s", result_text)

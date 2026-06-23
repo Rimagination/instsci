@@ -85,6 +85,15 @@ class PublisherAccessCatalogTests(unittest.TestCase):
         self.assertEqual(policy["preferred_off_campus_access"], "shibboleth_or_openathens")
         self.assertTrue(policy["subscription_institution"]["required_for_closed_access"])
         self.assertEqual(policy["subscription_institution"]["hardcoded_default"], "")
+        self.assertEqual(
+            policy["subscription_institution"]["resolution_order"][:4],
+            [
+                "--institution",
+                "config.carsi_idp_name",
+                "config.institution_name_en",
+                "config.institution_name_zh",
+            ],
+        )
         self.assertEqual(policy["final_pdf_verdict_requires"], "visible_cloakbrowser")
         self.assertIn("publisher_broker", policy["identity_order"])
         self.assertIn("webvpn_broker", policy["identity_order"])
@@ -94,6 +103,12 @@ class PublisherAccessCatalogTests(unittest.TestCase):
         )
         self.assertIn("standard_federated_sso", policy["federated_login_methods"])
         self.assertIn("wayfless_federated_sso", policy["federated_login_methods"])
+        self.assertIn("save it in local config", " ".join(policy["routing_rules"]))
+
+        publisher_broker = policy["identities"]["publisher_broker"]
+        self.assertIn("same_live_cloakbrowser_context", publisher_broker["recommended_persistence"])
+        self.assertIn("browser_profile_dir", publisher_broker["recommended_persistence"])
+        self.assertEqual(publisher_broker["final_verdict_scope"], "browser verified")
 
         webvpn = policy["identities"]["webvpn"]
         self.assertFalse(webvpn["global_default"])

@@ -45,6 +45,8 @@ class PublicLanguageTests(unittest.TestCase):
         self.assertIn("--publisher", result.output)
         self.assertIn("--institution", result.output)
         self.assertIn("profile", result.output.lower())
+        self.assertIn("--carsi-portal", result.output)
+        self.assertIn("resource portal", result.output)
 
     def test_papers_help_exposes_recommended_browser_workflow(self):
         result = self.runner.invoke(app, ["papers", "--help"])
@@ -53,6 +55,18 @@ class PublicLanguageTests(unittest.TestCase):
         self.assertIn("recommended", result.output.lower())
         self.assertIn("--publisher", result.output)
         self.assertIn("--institution", result.output)
+        self.assertIn("--detach", result.output)
+        self.assertIn("--carsi-portal", result.output)
+        self.assertIn("resource portal", result.output)
+
+    def test_jobs_help_exposes_long_running_controls(self):
+        result = self.runner.invoke(app, ["jobs", "--help"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("long-running", result.output.lower())
+        self.assertIn("status", result.output)
+        self.assertIn("resume", result.output)
+        self.assertIn("tail", result.output)
 
     def test_elsevier_setup_help_describes_global_config(self):
         result = self.runner.invoke(app, ["elsevier-setup", "--help"])
@@ -132,14 +146,39 @@ class PublicLanguageTests(unittest.TestCase):
             self.assertTrue(output_dir.exists())
             self.assertIn("Environment ready", result.output)
 
-    def test_setup_check_reports_missing_school_without_saving_new_config(self):
+    def test_setup_configures_institution_names_without_requiring_campus_school(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp) / ".instsci"
+            with patch.object(config_module, "DEFAULT_BASE_DIR", base):
+                result = self.runner.invoke(
+                    app,
+                    [
+                        "setup",
+                        "--institution-en",
+                        "Example University",
+                        "--institution-cn",
+                        "示例大学",
+                    ],
+                )
+                cfg = Config.load()
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertTrue(cfg.carsi_enabled)
+            self.assertEqual(cfg.carsi_idp_name, "Example University")
+            self.assertEqual(cfg.institution_name_en, "Example University")
+            self.assertEqual(cfg.institution_name_zh, "示例大学")
+            self.assertFalse(cfg.school)
+            self.assertIn("Environment ready", result.output)
+
+    def test_setup_check_reports_missing_subscription_institution_without_saving_new_config(self):
         with TemporaryDirectory() as tmp:
             base = Path(tmp) / ".instsci"
             with patch.object(config_module, "DEFAULT_BASE_DIR", base):
                 result = self.runner.invoke(app, ["setup", "--check"])
 
             self.assertEqual(result.exit_code, 2, result.output)
-            self.assertIn("School", result.output)
+            self.assertIn("Subscription", result.output)
+            self.assertIn("institution", result.output)
             self.assertIn("missing", result.output.lower())
 
     def test_package_exposes_inst_sci_console_scripts(self):
@@ -169,6 +208,16 @@ class PublicLanguageTests(unittest.TestCase):
         self.assertIn("Inst Token 不是必需", text)
         self.assertIn("view=FULL XML", text)
         self.assertIn("object/eid", text)
+
+    def test_readme_describes_local_login_persistence_without_password_storage(self):
+        text = Path("README.md").read_text(encoding="utf-8")
+
+        self.assertIn("Login persistence is local", text)
+        self.assertIn("persistent CloakBrowser profile", text)
+        self.assertIn("long-lived publisher broker", text)
+        self.assertIn("does not store your institution password", text)
+        self.assertIn("not treated as a complete login state", text)
+        self.assertIn("ignored by Git", text)
 
     def test_inst_sci_skill_guides_elsevier_global_setup_without_requiring_inst_token(self):
         text = Path("skills/instsci/SKILL.md").read_text(encoding="utf-8")

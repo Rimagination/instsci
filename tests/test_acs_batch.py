@@ -682,13 +682,14 @@ class ACSBatchTests(unittest.TestCase):
 
             def evaluate(self, script, options=None):
                 self.options = options
-                if options != {"institutionQuery": "清华大学"}:
+                aliases = (options or {}).get("institutionAliases") or []
+                if "Example University" not in aliases or "示例大学" not in aliases:
                     return None
                 if "queryMatches" not in script or "score += 100" not in script or "clickTargetFor" not in script:
                     return None
                 return {
                     "selector": "recent-institution",
-                    "text": "Tsinghua University (OpenAthens)",
+                    "text": "Example University (OpenAthens)",
                     "score": 200,
                 }
 
@@ -703,25 +704,18 @@ class ACSBatchTests(unittest.TestCase):
         downloader = PublisherBatchDownloader(
             cfg,
             profile=get_publisher_profile("wiley"),
-            institution_query="清华大学",
+            institution_query="Example University",
+            institution_aliases=("示例大学",),
         )
         result = DownloadResult(doi="10.1002/ldr.5372", status="failed")
 
         self.assertTrue(downloader._select_recent_institution(page, result))
-        self.assertEqual(page.options, {"institutionQuery": "清华大学"})
+        self.assertIn("Example University", page.options["institutionAliases"])
+        self.assertIn("示例大学", page.options["institutionAliases"])
         self.assertEqual(result.events[-1]["state"], "institution_selected")
-        self.assertIn("Tsinghua University (OpenAthens)", result.events[-1]["detail"])
+        self.assertIn("Example University (OpenAthens)", result.events[-1]["detail"])
 
-    def test_wiley_tsinghua_wayfless_uses_redirect_from_ssostart(self):
-        class FakePage:
-            url = "https://onlinelibrary.wiley.com/action/ssostart?redirectUri=%2Fdoi%2Ffull%2F10.1002%2Fldr.4101%3Fsaml_referrer"
-
-            def __init__(self):
-                self.goto_url = ""
-
-            def goto(self, url, **_kwargs):
-                self.goto_url = url
-
+    def test_wiley_does_not_expose_hardcoded_tsinghua_wayfless(self):
         cfg = Config(
             output_dir="out",
             cache_dir="cache",
@@ -729,18 +723,13 @@ class ACSBatchTests(unittest.TestCase):
             chrome_profile_dir="profile",
             carsi_cookie_dir="carsi",
         )
-        page = FakePage()
         downloader = PublisherBatchDownloader(
             cfg,
             profile=get_publisher_profile("wiley"),
-            institution_query="清华大学",
+            institution_query="Tsinghua University",
         )
-        result = DownloadResult(doi="10.1002/ldr.4101", status="failed")
 
-        self.assertTrue(downloader._select_wiley_tsinghua_openathens_wayfless(page, result))
-        self.assertIn("idp=https%3A%2F%2Fidp.tsinghua.edu.cn%2Fopenathens", page.goto_url)
-        self.assertIn("redirectUri=%2Fdoi%2Ffull%2F10.1002%2Fldr.4101%3Fsaml_referrer", page.goto_url)
-        self.assertIn("wiley-tsinghua-openathens-wayfless", result.events[-1]["detail"])
+        self.assertFalse(hasattr(downloader, "_select_wiley_tsinghua_openathens_wayfless"))
 
     def test_wiley_clicks_current_record_pdf_entry(self):
         class FakePage:
@@ -979,17 +968,19 @@ class ACSBatchTests(unittest.TestCase):
         self.assertTrue(ELSEVIER_PROFILE.institution_input_selectors)
         self.assertEqual(ELSEVIER_PROFILE.institution_result_selectors, ())
 
-    def test_elsevier_prefers_real_tsinghua_institution_anchor(self):
+    def test_elsevier_prefers_real_configured_institution_anchor(self):
         class FakePage:
             def __init__(self):
                 self.clicked = False
+                self.options = None
 
-            def evaluate(self, script):
+            def evaluate(self, script, options=None):
+                self.options = options
                 self.clicked = "auth.elsevier.com/shibauth/institutionlogin" in script.lower()
                 return {
                     "selector": "elsevier-institution-access",
-                    "text": "Access through Tsinghua University",
-                    "href": "https://auth.elsevier.com/ShibAuth/institutionLogin?entityID=https%3A%2F%2Fidp.tsinghua.edu.cn%2Fidp%2Fshibboleth",
+                    "text": "Access through Example University",
+                    "href": "https://auth.elsevier.com/ShibAuth/institutionLogin?entityID=https%3A%2F%2Fidp.example.edu%2Fidp%2Fshibboleth",
                     "score": 190,
                 }
 
@@ -1002,10 +993,15 @@ class ACSBatchTests(unittest.TestCase):
         )
         page = FakePage()
         result = DownloadResult(doi="10.1016/example", status="failed")
-        downloader = PublisherBatchDownloader(cfg, profile=ELSEVIER_PROFILE)
+        downloader = PublisherBatchDownloader(
+            cfg,
+            profile=ELSEVIER_PROFILE,
+            institution_query="Example University",
+        )
 
         self.assertTrue(downloader._click_sso_entry(page, result))
         self.assertTrue(page.clicked)
+        self.assertIn("Example University", page.options["institutionAliases"])
         self.assertIn("auth.elsevier.com/ShibAuth/institutionLogin", result.events[-1]["detail"])
 
     def test_elsevier_does_not_click_homepage_as_institution_entry(self):
@@ -1019,7 +1015,7 @@ class ACSBatchTests(unittest.TestCase):
                 return False
 
         class FakePage:
-            def evaluate(self, script):
+            def evaluate(self, script, options=None):
                 if "go to elsevier homepage" in script and "!matched" in script and ".filter(Boolean)" in script:
                     return None
                 return {
@@ -1044,19 +1040,7 @@ class ACSBatchTests(unittest.TestCase):
 
         self.assertFalse(downloader._click_sso_entry(FakePage(), result))
 
-    def test_elsevier_tsinghua_wayfless_uses_oauth_return_url(self):
-        class FakePage:
-            url = (
-                "https://id.elsevier.com/as/authorization.oauth2?"
-                "state=retryCounter%3D0%26returnUrl%3Dhttps%253A%252F%252Fwww.sciencedirect.com%252Fscience%252Farticle%252Fpii%252FS0929139326003835"
-            )
-
-            def __init__(self):
-                self.goto_url = ""
-
-            def goto(self, url, **_kwargs):
-                self.goto_url = url
-
+    def test_elsevier_does_not_expose_hardcoded_tsinghua_wayfless(self):
         cfg = Config(
             output_dir="out",
             cache_dir="cache",
@@ -1064,18 +1048,13 @@ class ACSBatchTests(unittest.TestCase):
             chrome_profile_dir="profile",
             carsi_cookie_dir="carsi",
         )
-        page = FakePage()
-        result = DownloadResult(doi="10.1016/j.apsoil.2026.107163", status="failed")
         downloader = PublisherBatchDownloader(
             cfg,
             profile=ELSEVIER_PROFILE,
             institution_query="Tsinghua University",
         )
 
-        self.assertTrue(downloader._select_elsevier_tsinghua_shibauth_wayfless(page, result))
-        self.assertIn("entityID=https%3A%2F%2Fidp.tsinghua.edu.cn%2Fidp%2Fshibboleth", page.goto_url)
-        self.assertIn("appReturnURL=https%3A%2F%2Fwww.sciencedirect.com%2Fscience%2Farticle%2Fpii%2FS0929139326003835", page.goto_url)
-        self.assertIn("elsevier-tsinghua-shibauth-wayfless", result.events[-1]["detail"])
+        self.assertFalse(hasattr(downloader, "_select_elsevier_tsinghua_shibauth_wayfless"))
 
     def test_world_scientific_profile_can_drive_institution_search(self):
         self.assertTrue(WORLD_SCIENTIFIC_PROFILE.institution_input_selectors)
@@ -1754,7 +1733,7 @@ class ACSBatchTests(unittest.TestCase):
         self.assertFalse(downloader._click_openathens_entry(FakePage(), result))
         self.assertEqual(result.events, [])
 
-    def test_openathens_wayfinder_selects_tsinghua_entity(self):
+    def test_openathens_wayfinder_does_not_use_hardcoded_tsinghua_entity(self):
         class FakePage:
             url = "https://wayfinder.openathens.net/?return=https%3A%2F%2Fconnect.openathens.net%2Fsaml%2F2%2Fauth%3Fr%3Dhttps%253A%252F%252Fconnect.openathens.net%252Foidc%252Fauth"
 
@@ -1780,10 +1759,9 @@ class ACSBatchTests(unittest.TestCase):
         )
         result = DownloadResult(doi="10.1088/example", status="failed")
 
-        self.assertTrue(downloader._select_openathens_wayfinder(page, result))
-        self.assertIn("https://connect.openathens.net/saml/2/auth", page.goto_url)
-        self.assertIn("entityID=https%3A%2F%2Fidp.tsinghua.edu.cn%2Fidp%2Fshibboleth", page.goto_url)
-        self.assertEqual(result.events[-1]["state"], "institution_selected")
+        self.assertFalse(downloader._select_openathens_wayfinder(page, result))
+        self.assertEqual(page.goto_url, "")
+        self.assertEqual(result.events, [])
 
     def test_openathens_wayfinder_does_not_use_tsinghua_entity_for_other_institution(self):
         class FakePage:
@@ -1852,6 +1830,155 @@ class ACSBatchTests(unittest.TestCase):
         self.assertTrue(downloader._is_human_login_page(FakePage()))
         self.assertFalse(downloader._click_sso_entry(FakePage(), result))
         self.assertEqual(result.events, [])
+
+    def test_sso_entry_does_not_click_beihang_login_page(self):
+        class FakePage:
+            url = "https://sso.buaa.edu.cn/login?service=https%3A%2F%2Fauth.example%2Fsaml"
+
+            def title(self):
+                return "Beihang University Login"
+
+            def evaluate(self, *_args, **_kwargs):
+                raise AssertionError("should not evaluate or click on human login page")
+
+            def locator(self, _selector):
+                raise AssertionError("should not locate controls on human login page")
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=ELSEVIER_PROFILE)
+        result = DownloadResult(doi="10.1016/example", status="failed")
+
+        self.assertTrue(downloader._is_human_login_page(FakePage()))
+        self.assertFalse(downloader._click_sso_entry(FakePage(), result))
+        self.assertEqual(result.events, [])
+
+    def test_login_flow_pauses_automation_after_landing_on_beihang_idp(self):
+        class FakePage:
+            url = "https://www.sciencedirect.com/science/article/pii/S0043135424004093"
+
+            def title(self):
+                return "Beihang University Login" if "buaa.edu.cn" in self.url else "ScienceDirect"
+
+            def locator(self, _selector):
+                raise AssertionError("should not locate controls on human login page")
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=ELSEVIER_PROFILE, login_timeout_sec=0)
+        page = FakePage()
+        result = DownloadResult(
+            doi="10.1016/example",
+            status="failed",
+            article_url="https://www.sciencedirect.com/science/article/pii/S0043135424004093",
+        )
+
+        def click_sso_entry(_page, _result):
+            page.url = "https://sso.buaa.edu.cn/login?service=https%3A%2F%2Fauth.example%2Fsaml"
+            return True
+
+        def fail_auto_action(message):
+            def _fail(_page, _result):
+                self.fail(message)
+
+            return _fail
+
+        downloader._dismiss_cookie_banners = lambda _page, _result: False  # type: ignore[method-assign]
+        downloader._click_sso_entry = click_sso_entry  # type: ignore[method-assign]
+        downloader._click_openathens_entry = fail_auto_action(
+            "should not continue automation on human login page"
+        )  # type: ignore[method-assign]
+        downloader._select_institution = fail_auto_action(
+            "should not select institution on human login page"
+        )  # type: ignore[method-assign]
+        downloader._click_optional_continue = fail_auto_action(
+            "should not click continue on human login page"
+        )  # type: ignore[method-assign]
+
+        with patch("instsci.publisher_batch.time.sleep", return_value=None):
+            self.assertFalse(downloader._complete_login_from_current_page(page, result))
+
+    def test_carsi_portal_preauth_opens_portal_before_first_record(self):
+        events = []
+
+        class FakeBody:
+            def inner_text(self, **_kwargs):
+                return "退出 本校已购资源"
+
+        class FakePortalPage:
+            url = ""
+
+            def goto(self, url, **_kwargs):
+                events.append(("goto", url))
+                self.url = "https://ds.carsi.edu.cn/index.html"
+
+            def title(self):
+                return "CARSI Resources"
+
+            def locator(self, _selector):
+                return FakeBody()
+
+            def close(self):
+                events.append(("close", "portal"))
+
+        class FakeContext:
+            def new_page(self):
+                return FakePortalPage()
+
+            def close(self):
+                events.append(("close", "context"))
+
+        class FakeDownloader(PublisherBatchDownloader):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.context = FakeContext()
+
+            def _launch_context(self, profile_dir=None):
+                return self.context
+
+            def fetch_one(self, _context, record, _run_dir):
+                events.append(("fetch", record.doi))
+                return DownloadResult(doi=record.doi, status="failed", reason="pdf_not_captured")
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = FakeDownloader(
+            cfg,
+            profile=ELSEVIER_PROFILE,
+            institution_query="北京航空航天大学",
+            carsi_portal_preauth=True,
+            login_timeout_sec=1,
+        )
+
+        with TemporaryDirectory() as tmp:
+            downloader.run_records(
+                [PaperRecord(doi="10.1016/example")],
+                Path(tmp),
+                retry_failed=True,
+            )
+
+        self.assertEqual(events[0], ("goto", "https://ds.carsi.edu.cn/login/index.html"))
+        self.assertEqual(events[1], ("close", "portal"))
+        self.assertEqual(events[2], ("fetch", "10.1016/example"))
+        self.assertEqual(
+            [event for event in events if event[0] == "goto"],
+            [("goto", "https://ds.carsi.edu.cn/login/index.html")],
+        )
 
     def test_fetch_one_rechecks_async_auth_wall_after_login(self):
         class FakePage:
@@ -2381,6 +2508,65 @@ class ACSBatchTests(unittest.TestCase):
 
         self.assertEqual(pdf_bytes, payload)
         self.assertEqual(pdf_url, "https://pubs.rsc.org/en/content/articlepdf/2026/nj/d5nj03688g")
+
+    def test_capture_pdf_uses_browser_context_cookies_before_page_navigation(self):
+        class FakeContext:
+            def cookies(self):
+                return [
+                    {
+                        "name": "sessionid",
+                        "value": "abc",
+                        "domain": ".pubs.rsc.org",
+                        "path": "/",
+                    }
+                ]
+
+        class FakePage:
+            url = "https://pubs.rsc.org/en/content/articlelanding/2026/nj/d5nj03688g"
+
+            def __init__(self):
+                self.listeners = {}
+
+            @property
+            def context(self):
+                return FakeContext()
+
+            def on(self, event, callback):
+                self.listeners[event] = callback
+
+            def remove_listener(self, event, _callback):
+                self.listeners.pop(event, None)
+
+            def evaluate(self, *_args):
+                return ["https://pubs.rsc.org/en/content/articlepdf/2026/nj/d5nj03688g"]
+
+            def goto(self, *_args, **_kwargs):
+                raise AssertionError("cookie fast path should avoid page navigation")
+
+            def locator(self, _selector):
+                raise RuntimeError("no body")
+
+            def title(self):
+                return ""
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=RSC_PROFILE)
+        payload = b"%PDF-" + (b"x" * MIN_PDF_BYTES)
+        downloader._fetch_pdf_url_with_browser_cookies = lambda url, _page: (payload, url)  # type: ignore[method-assign]
+        downloader._click_pdf_entry = lambda *_args, **_kwargs: self.fail("should not click PDF after cookie fast path")  # type: ignore[method-assign]
+        result = DownloadResult(doi="10.1039/d5nj03688g", status="failed")
+
+        pdf_bytes, pdf_url = downloader._capture_pdf(FakePage(), result.doi, result)
+
+        self.assertEqual(pdf_bytes, payload)
+        self.assertEqual(pdf_url, "https://pubs.rsc.org/en/content/articlepdf/2026/nj/d5nj03688g")
+        self.assertIn("cookie_fast_path_pdf_captured", [event["state"] for event in result.events])
 
     def test_capture_pdf_falls_back_to_sciencedirect_signed_asset_page_url(self):
         pdfft_url = "https://www.sciencedirect.com/science/article/pii/S0043135426003957/pdfft"
@@ -3155,6 +3341,7 @@ class ACSBatchTests(unittest.TestCase):
         )
         downloader = PublisherBatchDownloader(cfg, profile=WILEY_PROFILE, pdf_timeout_sec=17)
         payload = b"%PDF-" + (b"x" * MIN_PDF_BYTES)
+        downloader._fetch_pdf_url_with_browser_cookies = lambda url, _page: (None, url)  # type: ignore[method-assign]
         downloader._fetch_pdf_url = lambda url: (payload, url)  # type: ignore[method-assign]
         page = FakePage()
         result = DownloadResult(doi="10.1002/adem.70982", status="failed")

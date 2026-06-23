@@ -17,6 +17,8 @@ class ConfigPathTests(unittest.TestCase):
             self.assertEqual(Path(cfg.output_dir), base / "papers")
             self.assertEqual(Path(cfg.cache_dir), base / "cache")
             self.assertEqual(Path(cfg.cookie_path), base / "cookies.json")
+            self.assertEqual(Path(cfg.chrome_profile_dir), base / "chrome-profile")
+            self.assertEqual(Path(cfg.carsi_cookie_dir), base / "carsi_cookies")
 
     def test_load_uses_inst_sci_config_path(self):
         with TemporaryDirectory() as tmp:

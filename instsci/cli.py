@@ -32,6 +32,8 @@ app = typer.Typer(
     help="Fetch academic papers via institutional access, Open Access, or arXiv.",
     no_args_is_help=True,
 )
+jobs_app = typer.Typer(help="Manage long-running InstSci browser jobs.", no_args_is_help=True)
+app.add_typer(jobs_app, name="jobs")
 console = Console()
 
 
@@ -89,7 +91,24 @@ def _mask_secret(value: str) -> str:
 
 def _configured_subscription_institution(cfg: Config) -> str:
     """Return the configured subscription institution search text, if any."""
-    return (cfg.carsi_idp_name or cfg.school or "").strip()
+    return (
+        cfg.carsi_idp_name
+        or cfg.institution_name_en
+        or cfg.institution_name_zh
+        or cfg.school
+        or ""
+    ).strip()
+
+
+def _configured_institution_aliases(cfg: Config, primary: str = "") -> tuple[str, ...]:
+    values = [
+        primary,
+        cfg.carsi_idp_name,
+        cfg.institution_name_en,
+        cfg.institution_name_zh,
+        cfg.school,
+    ]
+    return tuple(dict.fromkeys(str(value or "").strip() for value in values if str(value or "").strip()))
 
 
 def _resolve_subscription_institution(
@@ -101,6 +120,13 @@ def _resolve_subscription_institution(
     """Resolve institution text without hard-coding any school as the default."""
     explicit = institution.strip()
     if explicit:
+        cfg.carsi_enabled = True
+        cfg.carsi_idp_name = explicit
+        if explicit.isascii():
+            cfg.institution_name_en = explicit
+        else:
+            cfg.institution_name_zh = explicit
+        cfg.save()
         return explicit
 
     configured = _configured_subscription_institution(cfg)
@@ -125,11 +151,158 @@ def _resolve_subscription_institution(
     if not value:
         console.print("[red]Subscription institution cannot be empty.[/red]")
         raise typer.Exit(1)
+    english_name = typer.prompt("Institution English name (optional)", default="", show_default=False).strip()
+    local_name = typer.prompt("Institution Chinese/local name (optional)", default="", show_default=False).strip()
 
     cfg.carsi_enabled = True
-    cfg.carsi_idp_name = value
+    cfg.carsi_idp_name = english_name or local_name or value
+    cfg.institution_name_en = english_name or (value if value.isascii() else cfg.institution_name_en)
+    cfg.institution_name_zh = local_name or (value if not value.isascii() else cfg.institution_name_zh)
     cfg.save()
-    return value
+    return cfg.carsi_idp_name
+
+
+def _read_paper_records(file: Path):
+    from .publisher_batch import PaperRecord
+
+    records = []
+    for raw_line in file.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip().lstrip("\ufeff")
+        if line and not line.startswith("#"):
+            records.append(PaperRecord(doi=line))
+    return records
+
+
+def _record_payload(records) -> list[dict[str, str]]:
+    return [
+        {"doi": record.doi, "title": record.title, "published": record.published, "url": record.url}
+        for record in records
+    ]
+
+
+def _resolve_papers_profile(records, publisher: str):
+    from .publisher_profiles import get_publisher_profile, infer_publisher_profile, list_publisher_profiles
+
+    if publisher.strip().lower() == "auto":
+        inferred = [infer_publisher_profile(record.doi) for record in records]
+        profiles = {profile for profile in inferred if profile is not None}
+        if len(profiles) != 1 or len(profiles) != len(set(inferred)):
+            console.print("[red]Could not infer one publisher for all DOIs.[/red]")
+            console.print(f"[yellow]Use --publisher with one of: {', '.join(list_publisher_profiles())}.[/yellow]")
+            raise typer.Exit(1)
+        return profiles.pop()
+
+    try:
+        return get_publisher_profile(publisher)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+
+def _broker_key_for_profile(profile, publisher: str) -> str:
+    profile_key_arg = publisher.strip().lower().replace(" ", "-")
+    if profile_key_arg and profile_key_arg != "auto":
+        return profile_key_arg
+    return profile.name.lower().replace(" ", "-")
+
+
+def _ensure_session_broker(
+    *,
+    broker_publisher: str,
+    cfg: Config,
+    institution: str,
+    broker_ttl: int,
+) -> bool:
+    from . import session_broker
+
+    if not session_broker.broker_is_running(broker_publisher):
+        console.print(f"[dim]Starting publisher session broker: {broker_publisher}[/dim]")
+        session_broker.start_broker_process(
+            publisher=broker_publisher,
+            browser_profile=cfg.chrome_profile_dir,
+            institution=institution,
+            ttl_seconds=broker_ttl,
+            cwd=Path.cwd(),
+        )
+        deadline = time.time() + 30
+        while time.time() < deadline and not session_broker.broker_is_running(broker_publisher):
+            time.sleep(1)
+    return session_broker.broker_is_running(broker_publisher)
+
+
+def _enqueue_papers_job(
+    *,
+    profile,
+    broker_publisher: str,
+    records,
+    run_dir: Path,
+    cfg: Config,
+    institution: str,
+    institution_aliases: tuple[str, ...],
+    login_timeout: int,
+    pdf_timeout: int,
+    post_login_hold: int,
+    post_run_hold: int,
+    carsi_portal_preauth: bool,
+    command: str,
+    parent_job_id: str = "",
+) -> dict:
+    from . import job_store, session_broker
+
+    broker_job = session_broker.enqueue_broker_job(
+        publisher=broker_publisher,
+        records=_record_payload(records),
+        output_dir=str(run_dir),
+        institution=institution,
+        institution_aliases=list(institution_aliases),
+        login_timeout=login_timeout,
+        pdf_timeout=pdf_timeout,
+        post_login_hold=post_login_hold,
+        post_run_hold=post_run_hold,
+        carsi_portal_preauth=carsi_portal_preauth,
+    )
+    return job_store.create_job(
+        publisher=profile.name,
+        broker_publisher=broker_publisher,
+        records=_record_payload(records),
+        output_dir=str(run_dir),
+        institution=institution,
+        institution_aliases=list(institution_aliases),
+        browser_profile=cfg.chrome_profile_dir,
+        broker_job=broker_job,
+        command=command,
+        login_timeout=login_timeout,
+        pdf_timeout=pdf_timeout,
+        post_login_hold=post_login_hold,
+        post_run_hold=post_run_hold,
+        carsi_portal_preauth=carsi_portal_preauth,
+        parent_job_id=parent_job_id,
+    )
+
+
+def _print_job_submitted(job: dict) -> None:
+    console.print(f"[green]Job submitted:[/green] {job['id']}")
+    console.print(f"[dim]Status:[/dim] instsci jobs status {job['id']}")
+    console.print(f"[dim]Tail:[/dim] instsci jobs tail {job['id']}")
+    console.print(f"[dim]Output:[/dim] {job['output_dir']}")
+
+
+def _print_jobs_table(jobs: list[dict]) -> None:
+    table = Table(title="InstSci Jobs")
+    table.add_column("Job")
+    table.add_column("Status")
+    table.add_column("Publisher")
+    table.add_column("Records")
+    table.add_column("Output", overflow="fold")
+    for job in jobs:
+        table.add_row(
+            str(job.get("id", "")),
+            str(job.get("status", "")),
+            str(job.get("publisher", "")),
+            str(job.get("record_count") or len(job.get("records") or [])),
+            str(job.get("output_dir", "")),
+        )
+    console.print(table)
 
 
 def _path_status(path_value: str) -> tuple[str, str]:
@@ -141,13 +314,25 @@ def _path_status(path_value: str) -> tuple[str, str]:
 
 def _show_setup_check(cfg: Config) -> bool:
     checks: list[tuple[str, str, str]] = []
-    checks.append(("School", "ok" if cfg.school else "missing", cfg.school or "set with --school"))
-    checks.append(("Access URL", "ok" if _access_url(cfg) else "missing", _access_url(cfg) or "derived from --school"))
-    federated_ready = (not cfg.carsi_enabled) or bool(cfg.carsi_idp_name)
+    subscription_institution = _configured_subscription_institution(cfg)
+    checks.append((
+        "Subscription institution",
+        "ok" if subscription_institution else "missing",
+        subscription_institution or "set with --institution-en/--institution-cn or --federated-school",
+    ))
+    checks.append(("Campus school", "ok" if cfg.school else "optional", cfg.school or "optional; set with --school for campus gateways"))
+    checks.append(("Access URL", "ok" if _access_url(cfg) else "optional", _access_url(cfg) or "optional; derived from --school"))
+    federated_ready = (not cfg.carsi_enabled) or bool(subscription_institution)
     checks.append((
         "Federated login",
         "ok" if federated_ready else "missing",
-        cfg.carsi_idp_name or ("disabled" if not cfg.carsi_enabled else "set with --federated-school"),
+        subscription_institution or ("disabled" if not cfg.carsi_enabled else "set with --federated-school"),
+    ))
+    aliases = ", ".join(_configured_institution_aliases(cfg))
+    checks.append((
+        "Institution names",
+        "ok" if aliases else "missing",
+        aliases or "set with --institution-en and/or --institution-cn",
     ))
     for label, path_value in [
         ("Output dir", cfg.output_dir),
@@ -164,9 +349,9 @@ def _show_setup_check(cfg: Config) -> bool:
     table.add_column("Detail", overflow="fold")
     ready = True
     for label, status, detail in checks:
-        if status != "ok":
+        if status == "missing":
             ready = False
-        style = "green" if status == "ok" else "yellow"
+        style = "green" if status == "ok" else ("cyan" if status == "optional" else "yellow")
         table.add_row(label, f"[{style}]{status}[/{style}]", detail)
     console.print(table)
     return ready
@@ -175,6 +360,8 @@ def _show_setup_check(cfg: Config) -> bool:
 @app.command()
 def setup(
     school: str = typer.Option("", "--school", help="Set institution by school name or partial match."),
+    institution_cn: str = typer.Option("", "--institution-cn", "--school-cn", help="Set the institution's Chinese/local name for publisher login matching."),
+    institution_en: str = typer.Option("", "--institution-en", "--school-en", help="Set the institution's English name for publisher login matching."),
     email: str = typer.Option("", "--email", help="Set email for Open Access metadata services."),
     output_dir: str = typer.Option("", "--output-dir", help="Set the default PDF output directory."),
     federated: bool = typer.Option(True, "--federated/--no-federated", help="Enable browser federated institutional login."),
@@ -186,7 +373,7 @@ def setup(
     changed = False
     school_entry = None
 
-    has_setter = any([school, email, output_dir, federated_school]) or not federated
+    has_setter = any([school, institution_cn, institution_en, email, output_dir, federated_school]) or not federated
     if check and not has_setter:
         if not _show_setup_check(cfg):
             raise typer.Exit(2)
@@ -204,14 +391,26 @@ def setup(
         cfg.email = email
         changed = True
 
+    if institution_cn:
+        cfg.institution_name_zh = institution_cn
+        changed = True
+
+    if institution_en:
+        cfg.institution_name_en = institution_en
+        changed = True
+
     if output_dir:
         cfg.output_dir = output_dir
         changed = True
 
-    if federated and (school or federated_school or cfg.school):
+    if federated and (school or federated_school or institution_en or institution_cn or cfg.carsi_idp_name or cfg.school):
         cfg.carsi_enabled = True
         if federated_school:
             cfg.carsi_idp_name = federated_school
+        elif institution_en:
+            cfg.carsi_idp_name = institution_en
+        elif institution_cn:
+            cfg.carsi_idp_name = institution_cn
         elif school_entry is not None:
             cfg.carsi_idp_name = school_entry.name
         elif cfg.school and not cfg.carsi_idp_name:
@@ -225,7 +424,7 @@ def setup(
     if changed:
         cfg.save()
 
-    ready = bool(cfg.school and _access_url(cfg) and ((not cfg.carsi_enabled) or cfg.carsi_idp_name))
+    ready = bool(_configured_subscription_institution(cfg))
     if ready:
         console.print("[green]Environment ready.[/green]")
     else:
@@ -237,6 +436,10 @@ def setup(
         if school_entry.school_type in {"easyconnect", "atrust"}:
             console.print("[yellow]This school needs a local campus connector before downloading.[/yellow]")
             console.print("  Set it with: [cyan]instsci config-cmd --connector-url socks5://127.0.0.1:1080[/cyan]")
+    if cfg.institution_name_en:
+        console.print(f"  Institution EN: {cfg.institution_name_en}")
+    if cfg.institution_name_zh:
+        console.print(f"  Institution CN: {cfg.institution_name_zh}")
     console.print(f"  Output dir:   {cfg.output_dir}")
     console.print(f"  Browser dir:  {cfg.chrome_profile_dir}")
     console.print(f"  Sessions dir: {cfg.carsi_cookie_dir}")
@@ -400,6 +603,7 @@ def est_batch(
 
     cfg = Config.load()
     institution = _resolve_subscription_institution(cfg, institution)
+    institution_aliases = _configured_institution_aliases(cfg, institution)
     run_dir = Path(output) if output else Path("downloads") / f"est_{year}_{limit}" / f"acs_cloak_{datetime.now():%Y%m%d_%H%M%S}"
     console.print(f"[bold]Fetching EST metadata:[/bold] year={year}, limit={limit}")
     records = fetch_est_records(year=year, limit=limit, email=cfg.email)
@@ -414,6 +618,7 @@ def est_batch(
     downloader = ACSCloakBatchDownloader(
         cfg,
         institution_query=institution,
+        institution_aliases=institution_aliases,
         login_timeout_sec=login_timeout,
         pdf_timeout_sec=pdf_timeout,
         post_login_hold_sec=post_login_hold,
@@ -449,6 +654,7 @@ def publisher_batch(
     institution: str = typer.Option("", "--institution", help="Subscription institution search text. Omit to use configured institution or prompt."),
     login_timeout: int = typer.Option(900, "--login-timeout", help="Seconds to wait for manual SSO/2FA completion."),
     pdf_timeout: int = typer.Option(60, "--pdf-timeout", help="Seconds to wait for each candidate PDF navigation."),
+    carsi_portal_preauth: bool = typer.Option(False, "--carsi-portal-preauth/--no-carsi-portal-preauth", help="Open the CARSI resource portal first in the same visible CloakBrowser profile."),
     target_verified: int = typer.Option(0, "--target-verified", help="Stop after this many verified PDFs. Zero disables early stop."),
     attempt_cache: str = typer.Option("", "--attempt-cache", help="JSONL attempt cache path. Defaults to attempts.jsonl in the run directory."),
     skip_attempted: bool = typer.Option(False, "--skip-attempted", help="Skip DOIs already present in the attempt cache."),
@@ -480,6 +686,7 @@ def publisher_batch(
     if browser_profile:
         cfg.chrome_profile_dir = browser_profile
     institution = _resolve_subscription_institution(cfg, institution)
+    institution_aliases = _configured_institution_aliases(cfg, institution)
     profile_key = publisher.strip().lower().replace(" ", "-")
     run_dir = Path(output) if output else Path("downloads") / f"{profile_key}_{len(records)}" / f"cloak_{datetime.now():%Y%m%d_%H%M%S}"
     console.print(f"[bold]Publisher profile:[/bold] {profile.name}")
@@ -492,8 +699,10 @@ def publisher_batch(
         cfg,
         profile=profile,
         institution_query=institution,
+        institution_aliases=institution_aliases,
         login_timeout_sec=login_timeout,
         pdf_timeout_sec=pdf_timeout,
+        carsi_portal_preauth=carsi_portal_preauth,
     )
     summary = downloader.run_records(
         records,
@@ -526,47 +735,32 @@ def papers(
     pdf_timeout: int = typer.Option(90, "--pdf-timeout", help="Seconds to wait for each PDF navigation."),
     post_login_hold: int = typer.Option(0, "--post-login-hold", help="Seconds to keep the authorized article page open before PDF capture."),
     post_run_hold: int = typer.Option(0, "--post-run-hold", help="Seconds to keep the browser page open after capture or failure."),
+    carsi_portal_preauth: bool = typer.Option(False, "--carsi-portal-preauth/--no-carsi-portal-preauth", help="Open the CARSI resource portal first in the same visible CloakBrowser profile."),
     retry_failed: bool = typer.Option(True, "--retry/--no-retry", help="Retry transient failures in a fresh browser context."),
     concurrency: int = typer.Option(1, "--concurrency", "-j", min=1, max=4, help="Parallel browser workers. Use 2 for ScienceDirect; higher values may trigger publisher checks."),
     broker: bool = typer.Option(True, "--broker/--no-broker", help="Use the long-lived publisher session broker by default."),
-    broker_ttl: int = typer.Option(86400, "--broker-ttl", help="Seconds to keep an auto-started broker alive."),
+    broker_ttl: int = typer.Option(259200, "--broker-ttl", help="Seconds to keep an auto-started broker alive."),
+    detach: bool = typer.Option(False, "--detach", help="Submit to the long-lived broker and return immediately."),
 ):
     """Recommended browser workflow for closed-access publisher PDFs."""
-    from .publisher_batch import PaperRecord, PublisherBatchDownloader
-    from .publisher_profiles import get_publisher_profile, infer_publisher_profile, list_publisher_profiles
+    from .publisher_batch import PublisherBatchDownloader
 
     if not file.exists():
         console.print(f"[red]File not found: {file}[/red]")
         raise typer.Exit(1)
 
-    records = [
-        PaperRecord(doi=line.strip())
-        for line in file.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
+    records = _read_paper_records(file)
     if not records:
         console.print("[yellow]No DOIs found in file.[/yellow]")
         raise typer.Exit(0)
 
-    if publisher.strip().lower() == "auto":
-        inferred = [infer_publisher_profile(record.doi) for record in records]
-        profiles = {profile for profile in inferred if profile is not None}
-        if len(profiles) != 1 or len(profiles) != len(set(inferred)):
-            console.print("[red]Could not infer one publisher for all DOIs.[/red]")
-            console.print(f"[yellow]Use --publisher with one of: {', '.join(list_publisher_profiles())}.[/yellow]")
-            raise typer.Exit(1)
-        profile = profiles.pop()
-    else:
-        try:
-            profile = get_publisher_profile(publisher)
-        except ValueError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(1) from exc
+    profile = _resolve_papers_profile(records, publisher)
 
     cfg = Config.load()
     if browser_profile:
         cfg.chrome_profile_dir = browser_profile
     institution = _resolve_subscription_institution(cfg, institution)
+    institution_aliases = _configured_institution_aliases(cfg, institution)
     profile_key = profile.name.lower().replace(" ", "-")
     run_dir = Path(output) if output else Path("downloads") / f"papers_{profile_key}_{len(records)}" / f"browser_{datetime.now():%Y%m%d_%H%M%S}"
 
@@ -576,38 +770,54 @@ def papers(
     console.print(f"[bold]Output:[/bold] {run_dir}")
     console.print(f"[bold]Browser profile:[/bold] {cfg.chrome_profile_dir}")
 
-    profile_key_arg = publisher.strip().lower().replace(" ", "-")
-    broker_publisher = profile_key_arg if profile_key_arg != "auto" else profile.name.lower().replace(" ", "-")
+    broker_publisher = _broker_key_for_profile(profile, publisher)
+    if detach and not broker:
+        console.print("[red]--detach requires the long-lived session broker. Remove --no-broker.[/red]")
+        raise typer.Exit(1)
     if broker:
         from . import session_broker
 
-        if not session_broker.broker_is_running(broker_publisher):
-            console.print(f"[dim]Starting publisher session broker: {broker_publisher}[/dim]")
-            session_broker.start_broker_process(
-                publisher=broker_publisher,
-                browser_profile=cfg.chrome_profile_dir,
-                institution=institution,
-                ttl_seconds=broker_ttl,
-                cwd=Path.cwd(),
-            )
-            deadline = time.time() + 30
-            while time.time() < deadline and not session_broker.broker_is_running(broker_publisher):
-                time.sleep(1)
-        if session_broker.broker_is_running(broker_publisher):
+        if _ensure_session_broker(
+            broker_publisher=broker_publisher,
+            cfg=cfg,
+            institution=institution,
+            broker_ttl=broker_ttl,
+        ):
             console.print(f"[bold]Session broker:[/bold] running ({broker_publisher})")
+            if detach:
+                job = _enqueue_papers_job(
+                    profile=profile,
+                    broker_publisher=broker_publisher,
+                    records=records,
+                    run_dir=run_dir,
+                    cfg=cfg,
+                    institution=institution,
+                    institution_aliases=institution_aliases,
+                    login_timeout=login_timeout,
+                    pdf_timeout=pdf_timeout,
+                    post_login_hold=post_login_hold,
+                    post_run_hold=post_run_hold,
+                    carsi_portal_preauth=carsi_portal_preauth,
+                    command=" ".join(sys.argv),
+                )
+                _print_job_submitted(job)
+                return
+
             timeout_seconds = max(
                 120,
-                login_timeout + len(records) * (pdf_timeout + post_login_hold + post_run_hold + 60),
+                login_timeout + (login_timeout if carsi_portal_preauth else 0) + len(records) * (pdf_timeout + post_login_hold + post_run_hold + 60),
             )
             summary = session_broker.submit_broker_job(
                 publisher=broker_publisher,
-                records=[{"doi": record.doi, "title": record.title, "published": record.published, "url": record.url} for record in records],
+                records=_record_payload(records),
                 output_dir=str(run_dir),
                 institution=institution,
+                institution_aliases=list(institution_aliases),
                 login_timeout=login_timeout,
                 pdf_timeout=pdf_timeout,
                 post_login_hold=post_login_hold,
                 post_run_hold=post_run_hold,
+                carsi_portal_preauth=carsi_portal_preauth,
                 timeout_seconds=timeout_seconds,
             )
             console.print(
@@ -626,10 +836,12 @@ def papers(
         cfg,
         profile=profile,
         institution_query=institution,
+        institution_aliases=institution_aliases,
         login_timeout_sec=login_timeout,
         pdf_timeout_sec=pdf_timeout,
         post_login_hold_sec=post_login_hold,
         post_run_hold_sec=post_run_hold,
+        carsi_portal_preauth=carsi_portal_preauth,
     )
     summary = downloader.run_records(
         records,
@@ -648,15 +860,196 @@ def papers(
         raise typer.Exit(2)
 
 
+@jobs_app.command("list")
+def jobs_list(
+    limit: int = typer.Option(20, "--limit", "-n", min=1, help="Number of recent jobs to show."),
+    json_output: bool = typer.Option(False, "--json", help="Print JSON instead of a table."),
+):
+    """List recent long-running InstSci jobs."""
+    from . import job_store
+
+    jobs = [job_store.refresh_job(job) for job in job_store.list_jobs(limit=limit)]
+    if json_output:
+        console.print(json.dumps(jobs, ensure_ascii=False, indent=2))
+        return
+    _print_jobs_table(jobs)
+
+
+@jobs_app.command("status")
+def jobs_status(
+    job_id: str = typer.Argument("", help="Job id. Omit to show recent jobs."),
+    json_output: bool = typer.Option(False, "--json", help="Print JSON instead of a table."),
+):
+    """Show one job status, or recent jobs when no id is given."""
+    from . import job_store
+
+    if not job_id:
+        jobs = [job_store.refresh_job(job) for job in job_store.list_jobs(limit=20)]
+        if json_output:
+            console.print(json.dumps(jobs, ensure_ascii=False, indent=2))
+        else:
+            _print_jobs_table(jobs)
+        return
+
+    try:
+        job = job_store.refresh_job(job_store.load_job(job_id))
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    if json_output:
+        console.print(json.dumps(job, ensure_ascii=False, indent=2))
+        return
+
+    _print_jobs_table([job])
+    summary = job.get("summary") or {}
+    if summary:
+        console.print(
+            f"[dim]Summary:[/dim] success={summary.get('success', 0)} "
+            f"unverified={summary.get('unverified', 0)} missing={summary.get('missing', 0)}"
+        )
+    if job.get("status") == "needs_attention":
+        console.print(f"[yellow]Resume:[/yellow] instsci jobs resume {job['id']}")
+
+
+@jobs_app.command("tail")
+def jobs_tail(
+    job_id: str = typer.Argument(help="Job id."),
+    lines: int = typer.Option(40, "--lines", "-n", min=1, help="Number of log lines per file."),
+):
+    """Print the latest broker logs and partial summary for a job."""
+    from . import job_store
+
+    try:
+        job = job_store.refresh_job(job_store.load_job(job_id))
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    output_dir = Path(str(job.get("output_dir") or ""))
+    partial_path = output_dir / "primary" / "summary_partial.json"
+    if partial_path.exists():
+        partial = json.loads(partial_path.read_text(encoding="utf-8"))
+        console.print(f"[bold]Partial results:[/bold] {len(partial)} records ({partial_path})")
+
+    for path in job_store.broker_log_paths(str(job.get("broker_publisher") or job.get("publisher") or "")):
+        tail = job_store.read_tail(path, lines=lines)
+        if not tail:
+            continue
+        console.print(f"\n[bold]{path}[/bold]")
+        for line in tail:
+            console.print(line)
+
+
+@jobs_app.command("resume")
+def jobs_resume(
+    job_id: str = typer.Argument(help="Job id to resume."),
+    output: str = typer.Option("", "--output", "-o", help="Output directory for the resumed run."),
+    broker_ttl: int = typer.Option(259200, "--broker-ttl", help="Seconds to keep an auto-started broker alive."),
+):
+    """Submit a follow-up job for missing or unverified DOI records."""
+    from . import job_store
+    from .publisher_batch import PaperRecord
+    from .publisher_profiles import get_publisher_profile
+
+    try:
+        job = job_store.refresh_job(job_store.load_job(job_id))
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    retry_payload = job_store.retry_records(job)
+    if not retry_payload:
+        console.print("[green]No missing or unverified records need resuming.[/green]")
+        return
+
+    broker_publisher = str(job.get("broker_publisher") or "").strip()
+    if not broker_publisher:
+        console.print("[red]Job is missing broker publisher metadata.[/red]")
+        raise typer.Exit(1)
+
+    cfg = Config.load()
+    browser_profile = str(job.get("browser_profile") or "")
+    if browser_profile:
+        cfg.chrome_profile_dir = browser_profile
+    institution = str(job.get("institution") or _configured_subscription_institution(cfg))
+    if not institution:
+        console.print("[red]Job has no institution metadata. Pass a new papers command with --institution.[/red]")
+        raise typer.Exit(1)
+    institution_aliases = tuple(job.get("institution_aliases") or _configured_institution_aliases(cfg, institution))
+
+    if not _ensure_session_broker(
+        broker_publisher=broker_publisher,
+        cfg=cfg,
+        institution=institution,
+        broker_ttl=broker_ttl,
+    ):
+        console.print(f"[red]Session broker did not start: {broker_publisher}[/red]")
+        raise typer.Exit(1)
+
+    old_output = Path(str(job.get("output_dir") or "runs"))
+    run_dir = Path(output) if output else old_output.with_name(f"{old_output.name}_resume_{datetime.now():%Y%m%d_%H%M%S}")
+    records = [PaperRecord(**record) for record in retry_payload]
+    profile = get_publisher_profile(broker_publisher)
+    resumed = _enqueue_papers_job(
+        profile=profile,
+        broker_publisher=broker_publisher,
+        records=records,
+        run_dir=run_dir,
+        cfg=cfg,
+        institution=institution,
+        institution_aliases=institution_aliases,
+        login_timeout=int(job.get("login_timeout") or 900),
+        pdf_timeout=int(job.get("pdf_timeout") or 90),
+        post_login_hold=int(job.get("post_login_hold") or 0),
+        post_run_hold=int(job.get("post_run_hold") or 0),
+        carsi_portal_preauth=bool(job.get("carsi_portal_preauth")),
+        command=f"instsci jobs resume {job_id}",
+        parent_job_id=job_id,
+    )
+    _print_job_submitted(resumed)
+
+
+@jobs_app.command("cancel")
+def jobs_cancel(job_id: str = typer.Argument(help="Queued job id to cancel.")):
+    """Cancel a queued job record."""
+    from . import job_store
+
+    try:
+        job = job_store.refresh_job(job_store.load_job(job_id), persist=False)
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    status = str(job.get("status") or "")
+    job = job_store.cancel_job(job)
+    console.print(f"[green]Canceled job:[/green] {job['id']}")
+    if status == "running":
+        console.print("[yellow]The broker may already be processing this job. Use session-broker-stop if you need to stop the browser worker.[/yellow]")
+
+
 @app.command("session-broker-status")
 def session_broker_status(
     publisher: str = typer.Option("elsevier", "--publisher", "-p", help="Publisher broker key."),
+    json_output: bool = typer.Option(False, "--json", help="Print JSON instead of a table."),
 ):
     """Show a long-lived publisher browser session broker."""
     from . import session_broker
 
     state = session_broker.load_broker_state(publisher)
     running = session_broker.broker_is_running(publisher)
+    payload = {
+        "publisher": publisher,
+        "status": "running" if running else "stopped",
+        "pid": state.get("pid", "") if state else "",
+        "profile_dir": state.get("profile_dir", "") if state else "",
+        "queue_dir": state.get("queue_dir", "") if state else "",
+        "heartbeat_at": state.get("heartbeat_at", "") if state else "",
+    }
+    if json_output:
+        console.print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+
     table = Table(title="InstSci Session Broker")
     table.add_column("Publisher")
     table.add_column("Status")
@@ -664,11 +1057,11 @@ def session_broker_status(
     table.add_column("Profile", overflow="fold")
     table.add_column("Queue", overflow="fold")
     table.add_row(
-        publisher,
-        "running" if running else "stopped",
-        str(state.get("pid", "")) if state else "",
-        str(state.get("profile_dir", "")) if state else "",
-        str(state.get("queue_dir", "")) if state else "",
+        str(payload["publisher"]),
+        str(payload["status"]),
+        str(payload["pid"]),
+        str(payload["profile_dir"]),
+        str(payload["queue_dir"]),
     )
     console.print(table)
 
@@ -690,7 +1083,7 @@ def session_broker_run(
     publisher: str = typer.Option(..., "--publisher", "-p"),
     browser_profile: str = typer.Option("", "--browser-profile"),
     institution: str = typer.Option("", "--institution"),
-    ttl: int = typer.Option(86400, "--ttl"),
+    ttl: int = typer.Option(259200, "--ttl"),
 ):
     """Run the long-lived broker loop. Internal command."""
     from .publisher_batch import PaperRecord, PublisherBatchDownloader
@@ -701,6 +1094,7 @@ def session_broker_run(
     if browser_profile:
         cfg.chrome_profile_dir = browser_profile
     institution = _resolve_subscription_institution(cfg, institution, prompt=False)
+    institution_aliases = _configured_institution_aliases(cfg, institution)
     profile = get_publisher_profile(publisher)
     root = broker_dir(publisher)
     queue_dir = root / "queue"
@@ -719,6 +1113,7 @@ def session_broker_run(
         cfg,
         profile=profile,
         institution_query=institution,
+        institution_aliases=institution_aliases,
         login_timeout_sec=900,
         pdf_timeout_sec=90,
     )
@@ -734,6 +1129,8 @@ def session_broker_run(
                     continue
                 try:
                     job = json.loads(job_path.read_text(encoding="utf-8"))
+                    job["started_at"] = job.get("started_at") or datetime.now().isoformat(timespec="seconds")
+                    job_path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
                     run_dir = Path(str(job["output_dir"]))
                     primary_dir = run_dir / "primary"
                     primary_dir.mkdir(parents=True, exist_ok=True)
@@ -741,11 +1138,14 @@ def session_broker_run(
                         cfg,
                         profile=profile,
                         institution_query=str(job.get("institution") or institution),
+                        institution_aliases=tuple(job.get("institution_aliases") or institution_aliases),
                         login_timeout_sec=int(job.get("login_timeout") or 900),
                         pdf_timeout_sec=int(job.get("pdf_timeout") or 90),
                         post_login_hold_sec=int(job.get("post_login_hold") or 0),
                         post_run_hold_sec=int(job.get("post_run_hold") or 0),
+                        carsi_portal_preauth=bool(job.get("carsi_portal_preauth")),
                     )
+                    job_downloader._preauthenticate_carsi_portal(context)
                     records = [PaperRecord(**record) for record in job.get("records", [])]
                     results = []
                     for record in records:
@@ -755,6 +1155,7 @@ def session_broker_run(
                     summary = job_downloader._write_complete_artifacts(records, results, run_dir)
                     summary["publisher"] = profile.name
                     summary["broker"] = True
+                    summary["job_id"] = job.get("id", "")
                     summary["browser_profile_dir"] = cfg.chrome_profile_dir
                     (run_dir / "summary.json").write_text(
                         json.dumps(summary, ensure_ascii=False, indent=2),
@@ -1078,6 +1479,8 @@ def config_cmd(
     set_access_url: str = typer.Option("", "--access-url", help="Set institutional access gateway URL."),
     set_webvpn_url: str = typer.Option("", "--webvpn-url", help="Legacy gateway URL option.", hidden=True),
     set_school: str = typer.Option("", "--school", help="Set school (use 'instsci schools' to list)."),
+    set_institution_cn: str = typer.Option("", "--institution-cn", "--school-cn", help="Set institution Chinese/local name for publisher login matching."),
+    set_institution_en: str = typer.Option("", "--institution-en", "--school-en", help="Set institution English name for publisher login matching."),
     set_connector_url: str = typer.Option("", "--connector-url", help="Set local SOCKS5 connector URL for EasyConnect."),
     set_proxy_url: str = typer.Option("", "--proxy-url", help="Legacy local connector URL option.", hidden=True),
     set_elsevier_key: str = typer.Option("", "--elsevier-api-key", help="Set Elsevier API key."),
@@ -1123,6 +1526,22 @@ def config_cmd(
             console.print(f"[red]{e}[/red]")
             raise typer.Exit(1)
 
+    if set_institution_cn:
+        cfg.institution_name_zh = set_institution_cn
+        if not cfg.carsi_idp_name:
+            cfg.carsi_idp_name = set_institution_cn
+        cfg.carsi_enabled = True
+        changed = True
+        console.print(f"[green]Institution Chinese/local name set to: {set_institution_cn}[/green]")
+
+    if set_institution_en:
+        cfg.institution_name_en = set_institution_en
+        if not cfg.carsi_idp_name:
+            cfg.carsi_idp_name = set_institution_en
+        cfg.carsi_enabled = True
+        changed = True
+        console.print(f"[green]Institution English name set to: {set_institution_en}[/green]")
+
     connector_url = set_connector_url or set_proxy_url
     if connector_url:
         cfg.proxy_url = connector_url
@@ -1162,6 +1581,7 @@ def config_cmd(
         cfg.save()
 
     has_setter = any([set_email, set_output, set_access_url, set_webvpn_url, set_school,
+                      set_institution_cn, set_institution_en,
                       set_connector_url, set_proxy_url,
                        set_elsevier_key, set_elsevier_token,
                        set_federated_enable, set_federated_disable, set_federated_school,
@@ -1184,6 +1604,8 @@ def config_cmd(
         console.print(f"  Elsevier inst tok: {'****' if cfg.elsevier_inst_token else '(not set)'}")
         console.print(f"  Federated login:   {'Yes' if cfg.carsi_enabled else 'No'}")
         console.print(f"  Federated school:  {cfg.carsi_idp_name or '(not set)'}")
+        console.print(f"  Institution EN:    {cfg.institution_name_en or '(not set)'}")
+        console.print(f"  Institution CN:    {cfg.institution_name_zh or '(not set)'}")
         console.print(f"  Output dir:        {cfg.output_dir}")
         console.print(f"  Cache dir:         {cfg.cache_dir}")
         console.print(f"  Cookie path:       {cfg.cookie_path}")

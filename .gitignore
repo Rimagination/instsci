@@ -36,11 +36,16 @@ desktop.ini
 .env.*.local
 
 # Runtime data (created by InstSci)
+.instsci/
 cookies.json
 config.json
 chrome-profile/
 .chrome-sciencedirect/
+carsi_cookies/
+carsi-cookies/
+brokers/
 downloads/
+runs/
 .tmp/
 instsci/_browsers/
 

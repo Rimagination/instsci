@@ -21,8 +21,8 @@ import requests
 from .config import Config
 from .extractors import pdf_extractor
 from .institution_identity import (
+    institution_aliases as build_institution_aliases,
     institution_result_selectors,
-    is_tsinghua_institution,
 )
 from .pdf_bytes import MIN_PDF_BYTES, is_plausible_pdf_bytes
 from .publisher_pdf_router import (
@@ -36,6 +36,7 @@ from .publisher_profiles import ACS_PROFILE, PublisherProfile
 EST_ISSN = "1520-5851"
 MAX_BROWSER_CONCURRENCY = 4
 PDF_URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+CARSI_PORTAL_LOGIN_URL = "https://ds.carsi.edu.cn/login/index.html"
 
 NON_ARTICLE_PDF_MARKERS = (
     "plain language summary",
@@ -152,14 +153,30 @@ class PublisherBatchDownloader:
         pdf_timeout_sec: int = 60,
         post_login_hold_sec: int = 0,
         post_run_hold_sec: int = 0,
+        carsi_portal_preauth: bool = False,
+        institution_aliases: tuple[str, ...] = (),
     ) -> None:
         self.config = config or Config.load()
         self.profile = profile
         self.institution_query = institution_query.strip()
+        config_aliases = (
+            self.config.carsi_idp_name,
+            self.config.institution_name_en,
+            self.config.institution_name_zh,
+            self.config.school,
+        )
+        self.institution_aliases = build_institution_aliases(
+            self.institution_query,
+            (*institution_aliases, *config_aliases),
+        )
         self.login_timeout_sec = login_timeout_sec
         self.pdf_timeout_ms = max(1, pdf_timeout_sec) * 1_000
         self.post_login_hold_sec = max(0, int(post_login_hold_sec or 0))
         self.post_run_hold_sec = max(0, int(post_run_hold_sec or 0))
+        self.carsi_portal_preauth = bool(carsi_portal_preauth)
+        self._carsi_portal_preauth_attempted = False
+        self._carsi_portal_preauth_done = False
+        self._carsi_portal_preauth_events: list[dict[str, str]] = []
 
     def run_records(
         self,
@@ -177,6 +194,8 @@ class PublisherBatchDownloader:
         run_path.mkdir(parents=True, exist_ok=True)
         target = target_verified if target_verified and target_verified > 0 else None
         worker_count = min(max(1, int(concurrency or 1)), MAX_BROWSER_CONCURRENCY)
+        if self.carsi_portal_preauth:
+            worker_count = 1
         if target:
             worker_count = 1
         attempt_cache_path = Path(attempt_cache) if attempt_cache else run_path / "attempts.jsonl"
@@ -250,6 +269,9 @@ class PublisherBatchDownloader:
         summary["target_reached"] = target_reached
         summary["skipped"] = max(0, len(records) - len(results) - cached_skipped)
         summary["cached_skipped"] = cached_skipped
+        summary["carsi_portal_preauth"] = self.carsi_portal_preauth
+        summary["carsi_portal_preauth_attempted"] = self._carsi_portal_preauth_attempted
+        summary["carsi_portal_preauth_done"] = self._carsi_portal_preauth_done
         summary["attempt_cache"] = str(attempt_cache_path)
         summary["concurrency"] = worker_count
         summary["browser_profile_dir"] = str(Path(self.config.chrome_profile_dir))
@@ -285,6 +307,7 @@ class PublisherBatchDownloader:
 
         context = self._launch_context()
         try:
+            self._preauthenticate_carsi_portal(context)
             for record in records:
                 result = self.fetch_one(context, record, run_dir)
                 results.append(result)
@@ -403,6 +426,113 @@ class PublisherBatchDownloader:
             humanize=True,
             accept_downloads=True,
             args=["--disable-features=CrossOriginOpenerPolicy"],
+        )
+
+    def _preauthenticate_carsi_portal(self, context: Any) -> bool:
+        if not self.carsi_portal_preauth:
+            return False
+        if self._carsi_portal_preauth_attempted:
+            return self._carsi_portal_preauth_done
+        self._carsi_portal_preauth_attempted = True
+        page = context.new_page()
+        result = DownloadResult(doi="_carsi_portal", status="failed", state="carsi_portal_preauth")
+        try:
+            page.goto(CARSI_PORTAL_LOGIN_URL, wait_until="domcontentloaded", timeout=60_000)
+            self._event(result, "carsi_portal_open", CARSI_PORTAL_LOGIN_URL)
+            self._select_carsi_portal_institution(page, result)
+            deadline = time.time() + max(1, self.login_timeout_sec)
+            while time.time() < deadline:
+                if self._carsi_portal_authenticated(page):
+                    self._event(result, "carsi_portal_authenticated", getattr(page, "url", ""))
+                    self._carsi_portal_preauth_done = True
+                    return True
+                time.sleep(3)
+            self._event(result, "carsi_portal_timeout", getattr(page, "url", ""))
+            return False
+        except Exception as exc:
+            self._event(result, "carsi_portal_error", f"{type(exc).__name__}: {exc}")
+            return False
+        finally:
+            self._carsi_portal_preauth_events = list(result.events)
+            try:
+                page.close()
+            except Exception:
+                pass
+
+    def _select_carsi_portal_institution(self, page: Any, result: DownloadResult) -> bool:
+        if not self.institution_query:
+            return False
+        try:
+            detail = page.evaluate(
+                """
+                (query) => {
+                  const needle = (query || '').toString().replace(/\\s+/g, ' ').trim().toLowerCase();
+                  if (!needle) return null;
+                  const visible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                  };
+                  const textOf = (el) => [
+                    el.innerText || '',
+                    el.textContent || '',
+                    el.value || '',
+                    el.getAttribute('aria-label') || '',
+                    el.getAttribute('title') || '',
+                    el.getAttribute('placeholder') || ''
+                  ].join(' ').replace(/\\s+/g, ' ').trim();
+                  const setInput = (input) => {
+                    input.focus();
+                    input.value = query;
+                    input.dispatchEvent(new Event('input', {bubbles: true}));
+                    input.dispatchEvent(new Event('change', {bubbles: true}));
+                  };
+                  const inputs = [...document.querySelectorAll('input[type="search"],input[type="text"],input:not([type])')]
+                    .filter(visible)
+                    .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+                  if (inputs[0]) setInput(inputs[0]);
+                  const controls = [...document.querySelectorAll('a,button,[role="button"],[role="option"],li,div')]
+                    .filter(visible)
+                    .map((el) => ({el, text: textOf(el)}))
+                    .filter((item) => item.text && item.text.toLowerCase().includes(needle) && item.text.length < 300)
+                    .sort((a, b) => a.text.length - b.text.length);
+                  if (!controls[0]) return inputs[0] ? {action: 'typed', query} : null;
+                  const target = controls[0].el.closest('a,button,[role="button"],[role="option"],li') || controls[0].el;
+                  target.click();
+                  return {action: 'selected', text: controls[0].text.slice(0, 180)};
+                }
+                """,
+                self.institution_query,
+            )
+            if detail:
+                self._event(result, "carsi_portal_institution", json.dumps(detail, ensure_ascii=False))
+                return True
+        except Exception as exc:
+            self._event(result, "carsi_portal_institution_error", f"{type(exc).__name__}: {exc}")
+        return False
+
+    def _carsi_portal_authenticated(self, page: Any) -> bool:
+        if self._is_human_login_page(page):
+            return False
+        current_url = str(getattr(page, "url", "") or "")
+        parsed = urlparse(current_url)
+        host = (parsed.hostname or parsed.netloc or "").lower()
+        if host != "ds.carsi.edu.cn":
+            return False
+        if "/login/" not in parsed.path.lower():
+            return True
+        text = self._body_text(page, 3_000).lower()
+        return any(
+            marker in text
+            for marker in (
+                "退出",
+                "注销",
+                "本校已购",
+                "我的资源",
+                "logout",
+                "sign out",
+                "my resources",
+            )
         )
 
     def fetch_one(self, context: Any, record: PaperRecord, run_dir: Path) -> DownloadResult:
@@ -562,10 +692,12 @@ class PublisherBatchDownloader:
         self._dismiss_cookie_banners(page, result)
         self._click_sso_entry(page, result)
         time.sleep(5)
-        self._dismiss_cookie_banners(page, result)
-        self._click_openathens_entry(page, result)
-        time.sleep(2)
-        self._select_institution(page, result)
+        if not self._is_human_login_page(page):
+            self._dismiss_cookie_banners(page, result)
+            self._click_openathens_entry(page, result)
+            time.sleep(2)
+        if not self._is_human_login_page(page):
+            self._select_institution(page, result)
 
         deadline = time.time() + self.login_timeout_sec
         last_state = ""
@@ -615,13 +747,15 @@ class PublisherBatchDownloader:
                     continue
                 if self._looks_logged_out(page) and self._click_sso_entry(page, result):
                     time.sleep(2)
-                    self._select_institution(page, result)
+                    if not self._is_human_login_page(page):
+                        self._select_institution(page, result)
                     last_auto_action = marker
                     last_auto_action_at = time.time()
                     continue
                 if self._click_openathens_entry(page, result):
                     time.sleep(2)
-                    self._select_institution(page, result)
+                    if not self._is_human_login_page(page):
+                        self._select_institution(page, result)
                     last_auto_action = marker
                     last_auto_action_at = time.time()
                     continue
@@ -663,7 +797,7 @@ class PublisherBatchDownloader:
             or ("temporarily unavailable" in haystack and "onlinesupport@ieee.org" in haystack)
             ):
             return "publisher_temporarily_unavailable"
-        if self._elsevier_has_tsinghua_access_entry(haystack):
+        if self._elsevier_has_configured_institution_access_entry(haystack):
             return ""
         if self._elsevier_lacks_pdf_entitlement(haystack):
             return "institution_pdf_entitlement_missing"
@@ -795,6 +929,8 @@ class PublisherBatchDownloader:
                 markers,
             )
             if clicked:
+                if self._is_elsevier_homepage_entry(clicked):
+                    return False
                 if result is not None:
                     self._event(result, "sso_entry_clicked", json.dumps(clicked, ensure_ascii=False))
                 return True
@@ -810,7 +946,7 @@ class PublisherBatchDownloader:
         try:
             detail = page.evaluate(
                 """
-                () => {
+                (options) => {
                   const norm = (value) => (value || '').toString().replace(/\\s+/g, ' ').trim();
                   const visible = (el) => {
                     const rect = el.getBoundingClientRect();
@@ -867,7 +1003,7 @@ class PublisherBatchDownloader:
         try:
             detail = page.evaluate(
                 """
-                () => {
+                (options) => {
                   const visible = (el) => {
                     const rect = el.getBoundingClientRect();
                     const style = window.getComputedStyle(el);
@@ -891,7 +1027,8 @@ class PublisherBatchDownloader:
                       let matched = false;
                       if (href.toLowerCase().includes('auth.elsevier.com/shibauth/institutionlogin')) score += 100;
                       if (href.toLowerCase().includes('auth.elsevier.com/shibauth/institutionlogin')) matched = true;
-                      if (haystack.includes('access through tsinghua university')) { score += 80; matched = true; }
+                      const aliases = (options && options.institutionAliases || []).map((value) => (value || '').toString().toLowerCase()).filter(Boolean);
+                      if (aliases.some((alias) => haystack.includes(alias))) { score += 80; matched = true; }
                       if (haystack.includes('access through your organization')) { score += 40; matched = true; }
                       if (haystack.includes('access through another organization')) score -= 60;
                       if (haystack.includes('purchase pdf')) score -= 80;
@@ -914,9 +1051,10 @@ class PublisherBatchDownloader:
                     score: target.score
                   };
                 }
-                """
+                """,
+                {"institutionAliases": list(self.institution_aliases)},
             )
-            if isinstance(detail, dict) and detail:
+            if isinstance(detail, dict) and detail and not self._is_elsevier_homepage_entry(detail):
                 if result is not None:
                     self._event(result, "sso_entry_clicked", json.dumps(detail, ensure_ascii=False))
                 return True
@@ -925,10 +1063,81 @@ class PublisherBatchDownloader:
                 self._event(result, "elsevier_institution_entry_error", f"{type(exc).__name__}: {exc}")
         return False
 
+    def _is_elsevier_homepage_entry(self, detail: Any) -> bool:
+        if self.profile.name.lower() != "elsevier" or not isinstance(detail, dict):
+            return False
+        text = str(detail.get("text") or "").strip().lower()
+        href = str(detail.get("href") or "").strip().lower().rstrip("/")
+        return "go to elsevier homepage" in text or href in {
+            "http://www.elsevier.com",
+            "https://www.elsevier.com",
+        }
+
     def _is_human_login_page(self, page: Any) -> bool:
         current_url = str(getattr(page, "url", "") or "")
-        host = (urlparse(current_url).netloc or "").lower()
-        return host.endswith("id.tsinghua.edu.cn") or host.endswith("idp.tsinghua.edu.cn")
+        parsed = urlparse(current_url)
+        host = (parsed.hostname or parsed.netloc or "").lower()
+        if host.endswith("id.tsinghua.edu.cn") or host.endswith("idp.tsinghua.edu.cn"):
+            return True
+        institution_host_suffixes = (
+            ".edu.cn",
+            ".edu",
+            ".ac.cn",
+            ".edu.hk",
+            ".edu.tw",
+            ".edu.mo",
+        )
+        if not any(host.endswith(suffix) for suffix in institution_host_suffixes):
+            return False
+        host_labels = [label for label in host.split(".") if label]
+        host_markers = (
+            "idp",
+            "sso",
+            "cas",
+            "auth",
+            "authserver",
+            "ids",
+            "id",
+            "login",
+            "pass",
+        )
+        if any(marker in host_labels for marker in host_markers):
+            return True
+        path_query = f"{parsed.path}?{parsed.query}".lower()
+        url_markers = (
+            "/idp",
+            "/sso",
+            "/cas",
+            "/auth",
+            "oauth",
+            "login",
+            "shibboleth",
+            "saml",
+        )
+        if any(marker in path_query for marker in url_markers):
+            return True
+        haystack = f"{self._title(page)} {self._body_text(page, 1_500)}".lower()
+        body_markers = (
+            "统一身份认证",
+            "统一认证",
+            "身份认证",
+            "账号登录",
+            "学号",
+            "工号",
+            "密码",
+            "验证码",
+            "北京航空航天大学",
+            "single sign-on",
+            "identity provider",
+            "university login",
+            "campus login",
+            "beihang",
+            "buaa",
+            "student id",
+            "employee id",
+            "verification code",
+        )
+        return any(marker in haystack for marker in body_markers)
 
     def _open_aps_article_institution_login(self, page: Any, result: DownloadResult | None = None) -> bool:
         if self.profile.name.lower() != "aps":
@@ -1105,6 +1314,8 @@ class PublisherBatchDownloader:
             return False
 
     def _click_openathens_entry(self, page: Any, result: DownloadResult) -> bool:
+        if self._is_human_login_page(page):
+            return False
         current_url = str(getattr(page, "url", "") or "")
         lower_url = current_url.lower()
         parsed = urlparse(current_url)
@@ -1162,19 +1373,17 @@ class PublisherBatchDownloader:
         return False
 
     def _select_institution(self, page: Any, result: DownloadResult) -> bool:
+        if self._is_human_login_page(page):
+            return False
         current_url = str(getattr(page, "url", "") or "")
         host = (urlparse(current_url).netloc or "").lower()
         if host.endswith("tsinghua.edu.cn"):
             return False
-        if self._select_wiley_tsinghua_openathens_wayfless(page, result):
-            return True
         if self._select_recent_institution(page, result):
             return True
         if not self.institution_query:
             self._event(result, "institution_required", "No subscription institution was configured for publisher login.")
             return False
-        if self._select_elsevier_tsinghua_shibauth_wayfless(page, result):
-            return True
         if self._select_openathens_wayfinder(page, result):
             return True
         if self._select_annual_reviews_openathens(page, result):
@@ -1203,82 +1412,6 @@ class PublisherBatchDownloader:
             except Exception:
                 continue
         return False
-
-    def _select_wiley_tsinghua_openathens_wayfless(self, page: Any, result: DownloadResult) -> bool:
-        if self.profile.name.lower() != "wiley":
-            return False
-        institution = (self.institution_query or "").lower()
-        if "清华" not in institution and "tsinghua" not in institution:
-            return False
-        current_url = str(getattr(page, "url", "") or "")
-        parsed = urlparse(current_url)
-        host = (parsed.netloc or "").lower()
-        if host and not host.endswith("onlinelibrary.wiley.com"):
-            return False
-        redirect_values = parse_qs(parsed.query).get("redirectUri") or parse_qs(parsed.query).get("redirecturi")
-        redirect_uri = redirect_values[0] if redirect_values else f"/doi/full/{result.doi}?saml_referrer"
-        wayfless_url = "https://onlinelibrary.wiley.com/action/ssostart?" + urlencode(
-            {
-                "idp": "https://idp.tsinghua.edu.cn/openathens",
-                "redirectUri": redirect_uri,
-            }
-        )
-        try:
-            page.goto(wayfless_url, wait_until="domcontentloaded", timeout=30_000)
-            self._event(
-                result,
-                "institution_selected",
-                json.dumps(
-                    {
-                        "selector": "wiley-tsinghua-openathens-wayfless",
-                        "text": "Tsinghua University (OpenAthens)",
-                        "href": wayfless_url,
-                    },
-                    ensure_ascii=False,
-                ),
-            )
-            return True
-        except Exception as exc:
-            self._event(result, "institution_select_error", f"{type(exc).__name__}: {exc}")
-            return False
-
-    def _select_elsevier_tsinghua_shibauth_wayfless(self, page: Any, result: DownloadResult) -> bool:
-        if self.profile.name.lower() != "elsevier" or not self._institution_query_is_tsinghua():
-            return False
-        current_url = str(getattr(page, "url", "") or "")
-        host = (urlparse(current_url).netloc or "").lower()
-        if not (
-            host.endswith("id.elsevier.com")
-            or host.endswith("auth.elsevier.com")
-            or host.endswith("sciencedirect.com")
-            or host.endswith("linkinghub.elsevier.com")
-        ):
-            return False
-        return_url = self._elsevier_auth_return_url(current_url)
-        wayfless_url = "https://auth.elsevier.com/ShibAuth/institutionLogin?" + urlencode(
-            {
-                "entityID": "https://idp.tsinghua.edu.cn/idp/shibboleth",
-                "appReturnURL": return_url,
-            }
-        )
-        try:
-            page.goto(wayfless_url, wait_until="domcontentloaded", timeout=30_000)
-            self._event(
-                result,
-                "institution_selected",
-                json.dumps(
-                    {
-                        "selector": "elsevier-tsinghua-shibauth-wayfless",
-                        "text": "Tsinghua University",
-                        "href": wayfless_url,
-                    },
-                    ensure_ascii=False,
-                ),
-            )
-            return True
-        except Exception as exc:
-            self._event(result, "institution_select_error", f"{type(exc).__name__}: {exc}")
-            return False
 
     def _elsevier_auth_return_url(self, current_url: str) -> str:
         parsed = urlparse(current_url)
@@ -1338,16 +1471,19 @@ class PublisherBatchDownloader:
                     'password',
                     'email'
                   ];
-                  const institutionQuery = norm(options && options.institutionQuery).toLowerCase();
-                  const queryTokens = institutionQuery
-                    .split(/[\\s,;，；()（）]+/)
+                  const aliases = (options && options.institutionAliases || [])
+                    .map((value) => norm(value).toLowerCase())
+                    .filter(Boolean);
+                  const queryTokens = aliases
+                    .flatMap((value) => value.split(/[\\s,;，；()（）]+/))
                     .map((token) => token.trim())
                     .filter((token) => token.length >= 3);
-                  const isTsinghuaQuery = institutionQuery.includes('清华') || institutionQuery.includes('tsinghua');
+                  const aliasMatches = (lower) => aliases.some((alias) => alias && lower.includes(alias));
                   const queryMatches = (lower) => {
-                    if (!institutionQuery) return true;
+                    if (!aliases.length) return true;
+                    if (aliasMatches(lower)) return true;
                     if (queryTokens.some((token) => lower.includes(token))) return true;
-                    return isTsinghuaQuery && (lower.includes('tsinghua') || lower.includes('清华'));
+                    return false;
                   };
                   const clickableSelector = 'a,button,[role="button"],[role="option"],input[type="button"],input[type="submit"]';
                   const clickTargetFor = (control, cardText, cardLower) => {
@@ -1365,7 +1501,7 @@ class PublisherBatchDownloader:
                         let score = 0;
                         if (childText) score += 10;
                         if (href) score += 15;
-                        if (lower.includes('tsinghua') || lower.includes('清华')) score += 100;
+                        if (aliasMatches(lower)) score += 100;
                         if (lower.includes('university')) score += 70;
                         if (lower.includes('openathens') || lower.includes('shibboleth') || lower.includes('carsi')) score += 30;
                         return {el: child, text: childText || cardText, score};
@@ -1395,7 +1531,7 @@ class PublisherBatchDownloader:
                         if (!queryMatches(lower)) return null;
                         const rect = control.getBoundingClientRect();
                         let score = 1;
-                        if (lower.includes('tsinghua') || lower.includes('清华')) score += 100;
+                        if (aliasMatches(lower)) score += 100;
                         if (lower.includes('university')) score += 70;
                         if (lower.includes('institute') || lower.includes('college') || lower.includes('academy')) score += 40;
                         if (lower.includes('openathens') || lower.includes('shibboleth') || lower.includes('carsi')) score += 30;
@@ -1414,7 +1550,7 @@ class PublisherBatchDownloader:
                   return null;
                 }
                 """,
-                {"institutionQuery": self.institution_query},
+                {"institutionAliases": list(self.institution_aliases)},
             )
             if isinstance(detail, dict) and detail.get("text"):
                 self._event(result, "institution_selected", json.dumps(detail, ensure_ascii=False))
@@ -1459,17 +1595,6 @@ class PublisherBatchDownloader:
             return False
 
         result_selectors = list(self._institution_result_selectors())
-        if self._institution_query_is_tsinghua():
-            result_selectors.extend(
-                (
-                    "text=Tsinghua University(OpenAthens)",
-                    "text=Tsinghua University (OpenAthens)",
-                    "text=Tsinghua University",
-                    "[role='option']:has-text('Tsinghua University')",
-                    "li:has-text('Tsinghua University')",
-                    "div:has-text('Tsinghua University(OpenAthens)')",
-                )
-            )
         for selector in result_selectors:
             try:
                 option = page.locator(selector).first
@@ -1500,9 +1625,9 @@ class PublisherBatchDownloader:
         try:
             clicked = page.evaluate(
                 """
-                (query) => {
-                  const needle = (query || '').toLowerCase();
-                  if (!needle) return null;
+                (aliases) => {
+                  const needles = (aliases || []).map((value) => (value || '').toString().toLowerCase()).filter(Boolean);
+                  if (!needles.length) return null;
                   const visible = (el) => {
                     const rect = el.getBoundingClientRect();
                     const style = window.getComputedStyle(el);
@@ -1518,9 +1643,9 @@ class PublisherBatchDownloader:
                     .filter(visible)
                     .filter((el) => {
                       const text = textOf(el).toLowerCase();
-                      return text.includes(needle) && text.length < 300;
+                      return needles.some((needle) => text.includes(needle)) && text.length < 300;
                     });
-                  const target = candidates.find((el) => textOf(el).toLowerCase().includes(needle));
+                  const target = candidates.find((el) => needles.some((needle) => textOf(el).toLowerCase().includes(needle)));
                   if (!target) return null;
                   const clickable = target.closest('a,button,[role="button"],[role="option"],li') || target;
                   const detail = textOf(clickable).slice(0, 160);
@@ -1528,7 +1653,7 @@ class PublisherBatchDownloader:
                   return detail;
                 }
                 """,
-                self.institution_query,
+                list(self.institution_aliases),
             )
             if clicked:
                 self._event(result, "institution_selected", str(clicked))
@@ -1538,16 +1663,12 @@ class PublisherBatchDownloader:
             return False
         return False
 
-    def _institution_query_is_tsinghua(self) -> bool:
-        return is_tsinghua_institution(self.institution_query)
-
     def _institution_result_selectors(self) -> tuple[str, ...]:
-        query = self.institution_query.strip()
-        if not query:
+        if not self.institution_aliases:
             return ()
-        selectors = list(institution_result_selectors(query))
-        if self._institution_query_is_tsinghua():
-            selectors.extend(self.profile.institution_result_selectors)
+        selectors: list[str] = []
+        for alias in self.institution_aliases:
+            selectors.extend(institution_result_selectors(alias))
         return tuple(dict.fromkeys(selectors))
 
     def _select_openathens_wayfinder(self, page: Any, result: DownloadResult) -> bool:
@@ -1556,40 +1677,14 @@ class PublisherBatchDownloader:
         host = (parsed.netloc or "").lower()
         if not host.endswith("wayfinder.openathens.net"):
             return False
-        if not self._institution_query_is_tsinghua():
-            return False
-        return_url = parse_qs(parsed.query).get("return", [""])[0]
-        if not return_url.startswith("https://connect.openathens.net/"):
-            return False
-        sep = "&" if "?" in return_url else "?"
-        direct_url = return_url + sep + urlencode(
-            {
-                "entityID": "https://idp.tsinghua.edu.cn/idp/shibboleth",
-                "target": current_url,
-            }
-        )
-        try:
-            page.goto(direct_url, wait_until="domcontentloaded", timeout=30_000)
-            self._event(result, "institution_selected", "OpenAthens entityID: Tsinghua")
-            return True
-        except Exception as exc:
-            self._event(result, "institution_select_error", f"{type(exc).__name__}: {exc}")
-            return False
+        return self._click_institution_search_result(page, result)
 
     def _select_annual_reviews_openathens(self, page: Any, result: DownloadResult) -> bool:
         current_url = str(getattr(page, "url", "") or "").lower()
         if "annualreviews.org/session/ext/athens" not in current_url:
             return False
-        if self._institution_query_is_tsinghua():
-            try:
-                tsinghua = page.locator("text=Tsinghua University (OpenAthens)").last
-                if tsinghua.is_visible(timeout=1_500):
-                    tsinghua.click(timeout=5_000, no_wait_after=True)
-                    page.locator("text=Go To Sign-in").last.click(timeout=5_000, no_wait_after=True)
-                    self._event(result, "institution_selected", "Tsinghua University (OpenAthens)")
-                    return True
-            except Exception:
-                pass
+        if self._click_institution_search_result(page, result):
+            return True
         try:
             input_box = page.locator(
                 "xpath=(//*[contains(normalize-space(.), 'Option 2: Sign-in with OpenAthens')]/following::input[contains(@placeholder, 'organization')])[1]"
@@ -1599,16 +1694,7 @@ class PublisherBatchDownloader:
                 page.locator("text=Find Your Organization").last.click(timeout=5_000, no_wait_after=True)
                 self._event(result, "institution_search", f"OpenAthens: {self.institution_query}")
                 time.sleep(2)
-                if self._institution_query_is_tsinghua():
-                    try:
-                        tsinghua = page.locator("text=Tsinghua University (OpenAthens)").last
-                        if tsinghua.is_visible(timeout=3_000):
-                            tsinghua.click(timeout=5_000, no_wait_after=True)
-                            page.locator("text=Go To Sign-in").last.click(timeout=5_000, no_wait_after=True)
-                            self._event(result, "institution_selected", "Tsinghua University (OpenAthens)")
-                    except Exception:
-                        pass
-                return True
+                return self._click_institution_search_result(page, result) or True
         except Exception:
             pass
         try:
@@ -1677,6 +1763,8 @@ class PublisherBatchDownloader:
         return False
 
     def _click_optional_continue(self, page: Any, result: DownloadResult) -> None:
+        if self._is_human_login_page(page):
+            return
         selectors = (
             "button:has-text('提交并继续')",
             "button:has-text('继续')",
@@ -1739,6 +1827,11 @@ class PublisherBatchDownloader:
                 if self._looks_logged_out(page) or self._wiley_institution_login_visible(page):
                     self._complete_login_from_current_page(page, result)
                     self._return_to_record_article_if_needed(page, result, doi)
+            body, final_url = self._capture_pdf_with_browser_cookies(page, doi, result)
+            if body:
+                captured["bytes"] = body
+                captured["url"] = final_url
+                return captured["bytes"], str(captured["url"])
             if self._click_pdf_entry(page, result, doi=doi):
                 time.sleep(5)
                 if not captured["bytes"]:
@@ -1794,6 +1887,26 @@ class PublisherBatchDownloader:
             except Exception:
                 pass
         return captured["bytes"], str(captured["url"])
+
+    def _capture_pdf_with_browser_cookies(
+        self,
+        page: Any,
+        doi: str,
+        result: DownloadResult,
+    ) -> tuple[bytes | None, str]:
+        for pdf_url in self._pdf_candidates(page, doi):
+            if not self._is_pdf_candidate_url(pdf_url) or self._is_supplementary_url(pdf_url):
+                continue
+            if not self._is_record_pdf_url(pdf_url, doi):
+                continue
+            body, final_url = self._fetch_pdf_url_with_browser_cookies(pdf_url, page)
+            if body:
+                self._event(result, "cookie_fast_path_pdf_captured", final_url)
+                return body, final_url
+        return None, ""
+
+    def _fetch_pdf_url_with_browser_cookies(self, url: str, page: Any) -> tuple[bytes | None, str]:
+        return self._fetch_pdf_url_with_browser_state(url, page)
 
     def _click_wiley_read_full_text_entry(self, page: Any, result: DownloadResult) -> bool:
         """Use Wiley's full-text access path before trying PDF/ePDF links."""
@@ -2580,7 +2693,7 @@ class PublisherBatchDownloader:
             return True
         if self._elsevier_has_full_text_access(text):
             return False
-        if self._elsevier_has_tsinghua_access_entry(text):
+        if self._elsevier_has_configured_institution_access_entry(text):
             return True
         if self._elsevier_lacks_pdf_entitlement(text):
             return True
@@ -2615,10 +2728,11 @@ class PublisherBatchDownloader:
             return False
         return "full text access" in text or "view pdf" in text
 
-    def _elsevier_has_tsinghua_access_entry(self, text: str) -> bool:
+    def _elsevier_has_configured_institution_access_entry(self, text: str) -> bool:
         if self.profile.name.lower() != "elsevier":
             return False
-        return "access through tsinghua university" in text.lower()
+        lower = text.lower()
+        return "access through" in lower and self._text_mentions_configured_institution(lower)
 
     def _elsevier_lacks_pdf_entitlement(self, text: str) -> bool:
         if self.profile.name.lower() != "elsevier":
@@ -2626,10 +2740,7 @@ class PublisherBatchDownloader:
         lower = text.lower()
         if "purchase pdf" not in lower or "article preview" not in lower:
             return False
-        return (
-            "brought to you by" in lower
-            or "tsinghua university" in lower
-        )
+        return "brought to you by" in lower or self._text_mentions_configured_institution(lower)
 
     def _has_publisher_institution_session(self, page: Any) -> bool:
         current_url = str(getattr(page, "url", "") or "")
@@ -2639,9 +2750,12 @@ class PublisherBatchDownloader:
         text = self._body_text(page, 5_000).lower()
         return (
             "brought to you by" in text
-            or "tsinghua university china" in text
-            or ("tsinghua university" in text and "institutional access" in text)
+            or self._text_mentions_configured_institution(text)
         )
+
+    def _text_mentions_configured_institution(self, text: str) -> bool:
+        lower = str(text or "").lower()
+        return any(alias.lower() in lower for alias in self.institution_aliases if alias)
 
     def _is_success_article_url(self, url: str) -> bool:
         lower = url.lower()
@@ -2866,13 +2980,21 @@ class ACSCloakBatchDownloader(PublisherBatchDownloader):
         config: Config | None = None,
         *,
         institution_query: str = "",
+        institution_aliases: tuple[str, ...] = (),
         login_timeout_sec: int = 900,
         pdf_timeout_sec: int = 60,
+        post_login_hold_sec: int = 0,
+        post_run_hold_sec: int = 0,
+        carsi_portal_preauth: bool = False,
     ) -> None:
         super().__init__(
             config,
             profile=ACS_PROFILE,
             institution_query=institution_query,
+            institution_aliases=institution_aliases,
             login_timeout_sec=login_timeout_sec,
             pdf_timeout_sec=pdf_timeout_sec,
+            post_login_hold_sec=post_login_hold_sec,
+            post_run_hold_sec=post_run_hold_sec,
+            carsi_portal_preauth=carsi_portal_preauth,
         )
