@@ -3,20 +3,40 @@
 import logging
 import os
 import time
-import urllib3
 
 import requests
 
 logger = logging.getLogger(__name__)
 
-# Auto-detect local HTTP connector and disable SSL verification warnings.
-if os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or \
-   os.environ.get("http_proxy") or os.environ.get("https_proxy"):
-    # Local network connectors often use self-signed certificates.
-    _SSL_VERIFY = False
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-else:
-    _SSL_VERIFY = True
+# TLS verification policy.
+#
+# Verification stays ON by default -- including behind an HTTP(S) proxy. The
+# previous behaviour disabled certificate verification for *every* request as
+# soon as any proxy env var was set, which silently exposed authenticated
+# institutional sessions and publisher traffic to interception. To trust a
+# self-signed connector CA, set REQUESTS_CA_BUNDLE (honoured natively by
+# requests). Verification is only disabled by an explicit, deliberate opt-in.
+_INSECURE_TLS_ENV = "INSTSCI_INSECURE_TLS"
+
+
+def _resolve_ssl_verify() -> bool:
+    opt_in = os.environ.get(_INSECURE_TLS_ENV, "").strip().lower()
+    if opt_in in {"1", "true", "yes", "on"}:
+        import urllib3
+
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        logger.warning(
+            "%s is set: TLS certificate verification is DISABLED for all HTTP "
+            "requests. This exposes traffic -- including authenticated sessions "
+            "-- to interception. Prefer REQUESTS_CA_BUNDLE to trust a "
+            "self-signed connector CA instead.",
+            _INSECURE_TLS_ENV,
+        )
+        return False
+    return True
+
+
+_SSL_VERIFY = _resolve_ssl_verify()
 
 
 def request_with_retry(
