@@ -1,7 +1,7 @@
 """Open Access detection via Unpaywall API."""
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import requests
 
@@ -24,6 +24,23 @@ class OAResult:
     authors: list[str] | None = None
     journal: str = ""
     year: int | None = None
+    pdf_urls: list[str] = field(default_factory=list)
+
+
+def collect_pdf_urls(best_oa: dict, oa_locations: list[dict]) -> list[str]:
+    """Return ordered, de-duplicated candidate PDF URLs.
+
+    The best OA location comes first, followed by every other OA location, so a
+    caller can fall back to a repository copy when the preferred (often
+    publisher) link is forbidden or broken.
+    """
+    urls: list[str] = []
+    candidates = [best_oa, *oa_locations] if best_oa else list(oa_locations)
+    for loc in candidates:
+        pdf = (loc.get("url_for_pdf") or "").strip()
+        if pdf and pdf not in urls:
+            urls.append(pdf)
+    return urls
 
 
 def check_oa(doi: str, email: str = "instsci@example.com") -> OAResult:
@@ -88,12 +105,10 @@ def check_oa(doi: str, email: str = "instsci@example.com") -> OAResult:
         else:
             result.source = "repository"
 
-    # If no PDF from best location, scan all locations
-    if not result.pdf_url:
-        for loc in oa_locations:
-            pdf = loc.get("url_for_pdf", "") or ""
-            if pdf:
-                result.pdf_url = pdf
-                break
+    # Collect every candidate PDF URL (best first, then all locations) so a
+    # forbidden or broken link can fall back to a repository copy.
+    result.pdf_urls = collect_pdf_urls(best_oa, oa_locations)
+    if not result.pdf_url and result.pdf_urls:
+        result.pdf_url = result.pdf_urls[0]
 
     return result

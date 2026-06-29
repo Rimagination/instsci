@@ -356,6 +356,11 @@ class PaperFetcher:
         Priority: arXiv PDF > OA PDF > OA HTML.
         If HTML extraction is too short, attempt PDF fallback from HTML page.
         """
+        arxiv_id = self._arxiv_id_from_doi(doi)
+        if arxiv_id:
+            logger.info("arXiv DOI detected (%s); routing to arXiv source.", doi)
+            return self._fetch_arxiv(arxiv_id, Paper(doi=doi))
+
         logger.info("Checking Unpaywall for OA version of %s...", doi)
         oa = unpaywall.check_oa(doi, email=self.config.email)
 
@@ -379,13 +384,17 @@ class PaperFetcher:
         if arxiv_id:
             return self._fetch_arxiv(arxiv_id, paper)
 
-        # Try direct OA PDF download FIRST (always prefer PDF over HTML)
-        if oa.pdf_url:
-            logger.info("Downloading OA PDF: %s", oa.pdf_url)
+        # Try direct OA PDF download FIRST (always prefer PDF over HTML).
+        # Iterate every candidate location so a forbidden/broken publisher
+        # link (e.g. a 403 on the publisher copy) can fall back to a
+        # repository copy rather than escalating prematurely.
+        pdf_candidates = oa.pdf_urls or ([oa.pdf_url] if oa.pdf_url else [])
+        for pdf_url in pdf_candidates:
+            logger.info("Downloading OA PDF: %s", pdf_url)
             paper.source = "open_access"
             self._rate_limit()
             try:
-                resp = request_with_retry("GET", oa.pdf_url, timeout=60, stream=True)
+                resp = request_with_retry("GET", pdf_url, timeout=60, stream=True)
                 resp.raise_for_status()
                 ct = resp.headers.get("content-type", "").lower()
                 if "pdf" in ct:
@@ -473,6 +482,20 @@ class PaperFetcher:
             paper.figures = pdf_extractor.extract_figures(pdf_path)
 
         return paper
+
+    @staticmethod
+    def _arxiv_id_from_doi(doi: str) -> str | None:
+        """Return the arXiv ID when the DOI is an arXiv DataCite DOI.
+
+        arXiv registers DOIs of the form ``10.48550/arXiv.<id>`` that Unpaywall
+        does not index, so they must be routed to the arXiv source directly
+        instead of falling through to institutional access.
+        """
+        low = (doi or "").strip().lower()
+        prefix = "10.48550/arxiv."
+        if low.startswith(prefix):
+            return doi.strip()[len(prefix):] or None
+        return None
 
     @staticmethod
     def _build_publisher_pdf_url(doi: str, resolved_url: str) -> str | None:
