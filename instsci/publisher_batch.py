@@ -1079,6 +1079,23 @@ class PublisherBatchDownloader:
         host = (parsed.hostname or parsed.netloc or "").lower()
         if host.endswith("id.tsinghua.edu.cn") or host.endswith("idp.tsinghua.edu.cn"):
             return True
+        # Federated-access hubs and identity providers where a human must act
+        # (choose institution, enter credentials, complete 2FA). The login loop
+        # MUST yield here; otherwise it keeps re-clicking SSO entries and
+        # thrashes the page so the user can never type. The automation never
+        # fills credentials, so treating any real login/IdP page as "wait" is
+        # always safe.
+        federation_host_suffixes = (
+            "openathens.net",
+            "seamlessaccess.org",
+            "microsoftonline.com",
+            "okta.com",
+            "auth0.com",
+            "duosecurity.com",
+            "pingidentity.com",
+        )
+        if any(host == s or host.endswith("." + s) for s in federation_host_suffixes):
+            return True
         institution_host_suffixes = (
             ".edu.cn",
             ".edu",
@@ -1086,6 +1103,16 @@ class PublisherBatchDownloader:
             ".edu.hk",
             ".edu.tw",
             ".edu.mo",
+            ".edu.au",
+            ".ac.uk",
+            ".ac.nz",
+            ".edu.sg",
+            ".ac.jp",
+            ".ac.za",
+            ".ac.in",
+            ".edu.in",
+            ".ac.kr",
+            ".edu.my",
         )
         if not any(host.endswith(suffix) for suffix in institution_host_suffixes):
             return False
