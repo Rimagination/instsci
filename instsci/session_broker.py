@@ -166,6 +166,13 @@ def submit_broker_job(
     carsi_portal_preauth: bool,
     timeout_seconds: int,
     institution_aliases: list[str] | None = None,
+    include_supplementary: bool = False,
+    supplementary_only: bool = False,
+    supplementary_fast: bool = False,
+    retry_failed: bool = True,
+    target_verified: int | None = None,
+    attempt_cache: str = "",
+    skip_attempted: bool = False,
 ) -> dict[str, Any]:
     queued = enqueue_broker_job(
         publisher=publisher,
@@ -178,6 +185,13 @@ def submit_broker_job(
         post_login_hold=post_login_hold,
         post_run_hold=post_run_hold,
         carsi_portal_preauth=carsi_portal_preauth,
+        include_supplementary=include_supplementary,
+        supplementary_only=supplementary_only,
+        supplementary_fast=supplementary_fast,
+        retry_failed=retry_failed,
+        target_verified=target_verified,
+        attempt_cache=attempt_cache,
+        skip_attempted=skip_attempted,
     )
     return wait_for_broker_job(
         publisher=publisher,
@@ -199,6 +213,13 @@ def enqueue_broker_job(
     post_run_hold: int,
     carsi_portal_preauth: bool = False,
     institution_aliases: list[str] | None = None,
+    include_supplementary: bool = False,
+    supplementary_only: bool = False,
+    supplementary_fast: bool = False,
+    retry_failed: bool = True,
+    target_verified: int | None = None,
+    attempt_cache: str = "",
+    skip_attempted: bool = False,
     job_id: str | None = None,
 ) -> dict[str, Any]:
     """Write a broker queue job without waiting for completion."""
@@ -222,6 +243,13 @@ def enqueue_broker_job(
         "post_login_hold": post_login_hold,
         "post_run_hold": post_run_hold,
         "carsi_portal_preauth": bool(carsi_portal_preauth),
+        "include_supplementary": bool(include_supplementary),
+        "supplementary_only": bool(supplementary_only),
+        "supplementary_fast": bool(supplementary_fast),
+        "retry_failed": bool(retry_failed),
+        "target_verified": int(target_verified or 0),
+        "attempt_cache": str(attempt_cache or ""),
+        "skip_attempted": bool(skip_attempted),
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
     job_path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")

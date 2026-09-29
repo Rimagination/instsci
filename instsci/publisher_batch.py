@@ -3,22 +3,28 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import Counter
 import csv
+import hashlib
 import inspect
 import json
+import math
+import mimetypes
 import re
 import shutil
+import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 import requests
 
 from .config import Config
+from .desktop_alerts import show_desktop_alert
 from .extractors import pdf_extractor
 from .institution_identity import (
     institution_aliases as build_institution_aliases,
@@ -26,17 +32,23 @@ from .institution_identity import (
 )
 from .pdf_bytes import MIN_PDF_BYTES, is_plausible_pdf_bytes
 from .publisher_pdf_router import (
+    belongs_to_current_article,
     build_pdf_candidates,
     extract_elsevier_pii,
     is_pdf_candidate_url,
     is_supplementary_url,
 )
 from .publisher_profiles import ACS_PROFILE, PublisherProfile
+from .retry_policy import (
+    BROWSER_RETRY_COOLDOWN_SEC, BROWSER_RETRY_INTERVAL_SEC,
+    TRANSIENT_REASONS, failure_category,
+)
 
 EST_ISSN = "1520-5851"
 MAX_BROWSER_CONCURRENCY = 4
 PDF_URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 CARSI_PORTAL_LOGIN_URL = "https://ds.carsi.edu.cn/login/index.html"
+CHALLENGE_QUIET_WAIT_SEC = 30.0
 
 NON_ARTICLE_PDF_MARKERS = (
     "plain language summary",
@@ -45,13 +57,31 @@ NON_ARTICLE_PDF_MARKERS = (
     "we are delighted to inform you that your manuscript",
     "department of health and human services food and drug administration",
     "new drug application",
+    # Publisher supplementary-material cover sheets must never verify as the
+    # article full text — Springer ESM literally opens with this line (#15)
+    "supplementary material for",
+    "supplementary materials for",
+    "supplementary information for",
+    "supplementary material:",
+    "moesm",
+    "mediaobjects",
 )
 
-RETRYABLE_REASONS = {
-    "pdf_not_captured",
-    "navigation_error",
-    "challenge_or_viewer_timeout",
-}
+RETRYABLE_REASONS = TRANSIENT_REASONS
+
+# Controls matching this pattern sell access — clicking them as a "PDF
+# entry" either purchases nothing or dead-ends on a paywall 404 (#13).
+_PURCHASE_CONTROL_RE = re.compile(
+    r"buy\b|purchase|add[- ]to[- ]cart|shopping[- ]cart|checkout"
+    r"|(?:usd|eur|gbp|cny|rmb)\s?\d|\$\s?\d|￥\s?\d|¥\s?\d",
+    re.IGNORECASE,
+)
+
+
+def _is_purchase_control(text: str, href: str) -> bool:
+    return bool(_PURCHASE_CONTROL_RE.search(str(text or ""))) or bool(
+        _PURCHASE_CONTROL_RE.search(str(href or ""))
+    )
 
 
 @dataclass
@@ -77,6 +107,8 @@ class DownloadResult:
     size_bytes: int = 0
     verified_match: bool = False
     diagnostic_path: str = ""
+    supplementary_paths: list[str] = field(default_factory=list)
+    supplementary_urls: list[str] = field(default_factory=list)
     events: list[dict[str, str]] = field(default_factory=list)
 
     @property
@@ -155,6 +187,9 @@ class PublisherBatchDownloader:
         post_run_hold_sec: int = 0,
         carsi_portal_preauth: bool = False,
         institution_aliases: tuple[str, ...] = (),
+        include_supplementary: bool = False,
+        supplementary_only: bool = False,
+        supplementary_fast: bool = False,
     ) -> None:
         self.config = config or Config.load()
         self.profile = profile
@@ -174,9 +209,13 @@ class PublisherBatchDownloader:
         self.post_login_hold_sec = max(0, int(post_login_hold_sec or 0))
         self.post_run_hold_sec = max(0, int(post_run_hold_sec or 0))
         self.carsi_portal_preauth = bool(carsi_portal_preauth)
+        self.supplementary_only = bool(supplementary_only)
+        self.supplementary_fast = bool(supplementary_fast)
+        self.include_supplementary = bool(include_supplementary or self.supplementary_only)
         self._carsi_portal_preauth_attempted = False
         self._carsi_portal_preauth_done = False
         self._carsi_portal_preauth_events: list[dict[str, str]] = []
+        self._manual_challenge_alert_last_at = 0.0
 
     def run_records(
         self,
@@ -235,24 +274,21 @@ class PublisherBatchDownloader:
             for record in records_to_run[len(results):]:
                 missing_reasons[record.doi.lower()] = "target_verified_reached"
 
-        failed_records = [
-            record
-            for record, result in zip(records, results)
-            if result.status == "failed" and result.reason in RETRYABLE_REASONS
-        ]
+        failed_records = self._retry_candidates(records_to_run, results)
 
         retry_results: list[DownloadResult] = []
         if retry_failed and failed_records and not target_reached:
             remaining_target = target - self._count_verified(results) if target else None
+            time.sleep(BROWSER_RETRY_COOLDOWN_SEC)
             retry_results = self._run_once(
                 failed_records,
                 run_path / "retry",
                 target_verified=remaining_target,
                 attempt_cache_path=attempt_cache_path,
                 phase="retry",
-                concurrency=worker_count,
+                concurrency=1,
             )
-            retry_by_doi = {result.doi.lower(): result for result in retry_results if result.ok}
+            retry_by_doi = {result.doi.lower(): result for result in retry_results}
             results = [
                 retry_by_doi.get(result.doi.lower(), result)
                 for result in results
@@ -263,8 +299,7 @@ class PublisherBatchDownloader:
         summary["publisher"] = self.profile.name
         summary["primary"] = primary_counts
         summary["final"] = self._count_results(results)
-        summary["retry_attempted"] = len(failed_records)
-        summary["retry_success"] = sum(1 for result in retry_results if result.ok)
+        summary.update(self._retry_summary(results, retry_results, len(failed_records)))
         summary["target_verified"] = target
         summary["target_reached"] = target_reached
         summary["skipped"] = max(0, len(records) - len(results) - cached_skipped)
@@ -274,12 +309,134 @@ class PublisherBatchDownloader:
         summary["carsi_portal_preauth_done"] = self._carsi_portal_preauth_done
         summary["attempt_cache"] = str(attempt_cache_path)
         summary["concurrency"] = worker_count
+        summary["include_supplementary"] = self.include_supplementary
+        summary["supplementary_only"] = self.supplementary_only
+        summary["supplementary_fast"] = self.supplementary_fast
         summary["browser_profile_dir"] = str(Path(self.config.chrome_profile_dir))
         (run_path / "summary.json").write_text(
             json.dumps(summary, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         return summary
+
+    def run_records_with_context(
+        self,
+        context: Any,
+        records: list[PaperRecord],
+        run_dir: str | Path,
+        *,
+        retry_failed: bool = True,
+        target_verified: int | None = None,
+        attempt_cache: str | Path | None = None,
+        skip_attempted: bool = False,
+    ) -> dict[str, Any]:
+        """Download records through an already-open CloakBrowser context."""
+        run_path = Path(run_dir)
+        run_path.mkdir(parents=True, exist_ok=True)
+        target = target_verified if target_verified and target_verified > 0 else None
+        attempt_cache_path = Path(attempt_cache) if attempt_cache else run_path / "attempts.jsonl"
+        (run_path / "records.json").write_text(
+            json.dumps([asdict(r) for r in records], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (run_path / "dois.txt").write_text(
+            "\n".join(r.doi for r in records) + "\n",
+            encoding="utf-8",
+        )
+
+        self._preauthenticate_carsi_portal(context)
+
+        missing_reasons: dict[str, str] = {}
+        records_to_run = records
+        cached_skipped = 0
+        if skip_attempted:
+            attempted_dois = self._read_attempted_dois(attempt_cache_path)
+            records_to_run = []
+            for record in records:
+                if record.doi.lower() in attempted_dois:
+                    cached_skipped += 1
+                    missing_reasons[record.doi.lower()] = "skipped_cached_attempt"
+                else:
+                    records_to_run.append(record)
+
+        results = self._run_once_in_context(
+            context,
+            records_to_run,
+            run_path / "primary",
+            target_verified=target,
+            attempt_cache_path=attempt_cache_path,
+            phase="primary",
+        )
+        primary_counts = self._count_results(results)
+        target_reached = bool(target and self._count_verified(results) >= target)
+        if target_reached and len(results) < len(records_to_run):
+            for record in records_to_run[len(results):]:
+                missing_reasons[record.doi.lower()] = "target_verified_reached"
+
+        failed_records = self._retry_candidates(records_to_run, results)
+
+        retry_results: list[DownloadResult] = []
+        if retry_failed and failed_records and not target_reached:
+            remaining_target = target - self._count_verified(results) if target else None
+            time.sleep(BROWSER_RETRY_COOLDOWN_SEC)
+            retry_results = self._run_once_in_context(
+                context,
+                failed_records,
+                run_path / "retry",
+                target_verified=remaining_target,
+                attempt_cache_path=attempt_cache_path,
+                phase="retry",
+            )
+            retry_by_doi = {result.doi.lower(): result for result in retry_results}
+            results = [
+                retry_by_doi.get(result.doi.lower(), result)
+                for result in results
+            ]
+            target_reached = bool(target and self._count_verified(results) >= target)
+
+        summary = self._write_complete_artifacts(records, results, run_path, missing_reasons=missing_reasons)
+        summary["publisher"] = self.profile.name
+        summary["primary"] = primary_counts
+        summary["final"] = self._count_results(results)
+        summary.update(self._retry_summary(results, retry_results, len(failed_records)))
+        summary["target_verified"] = target
+        summary["target_reached"] = target_reached
+        summary["skipped"] = max(0, len(records) - len(results) - cached_skipped)
+        summary["cached_skipped"] = cached_skipped
+        summary["carsi_portal_preauth"] = self.carsi_portal_preauth
+        summary["carsi_portal_preauth_attempted"] = self._carsi_portal_preauth_attempted
+        summary["carsi_portal_preauth_done"] = self._carsi_portal_preauth_done
+        summary["attempt_cache"] = str(attempt_cache_path)
+        summary["concurrency"] = 1
+        summary["include_supplementary"] = self.include_supplementary
+        summary["supplementary_only"] = self.supplementary_only
+        summary["supplementary_fast"] = self.supplementary_fast
+        summary["browser_profile_dir"] = str(Path(self.config.chrome_profile_dir))
+        (run_path / "summary.json").write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return summary
+
+    @staticmethod
+    def _retry_candidates(records: list[PaperRecord], results: list[DownloadResult]) -> list[PaperRecord]:
+        eligible = {
+            result.doi.lower() for result in results
+            if result.status == "failed" and failure_category(result.reason, result.state) == "transient"
+        }
+        return [record for record in records if record.doi.lower() in eligible]
+
+    @staticmethod
+    def _retry_summary(results: list[DownloadResult], retries: list[DownloadResult], eligible: int) -> dict:
+        return {
+            "retry_eligible": eligible,
+            "retry_attempted": len(retries),
+            "retry_success": sum(1 for result in retries if result.ok),
+            "failure_categories": dict(Counter(
+                failure_category(result.reason, result.state)
+                for result in results if result.status == "failed"
+            )),
+        }
 
     def _run_once(
         self,
@@ -309,6 +466,8 @@ class PublisherBatchDownloader:
         try:
             self._preauthenticate_carsi_portal(context)
             for record in records:
+                if phase == "retry" and results:
+                    time.sleep(BROWSER_RETRY_INTERVAL_SEC)
                 result = self.fetch_one(context, record, run_dir)
                 results.append(result)
                 if result.ok and result.verified_match:
@@ -322,6 +481,34 @@ class PublisherBatchDownloader:
                 context.close()
             except Exception:
                 pass
+
+        self._write_results(run_dir / "summary.json", results)
+        return results
+
+    def _run_once_in_context(
+        self,
+        context: Any,
+        records: list[PaperRecord],
+        run_dir: Path,
+        *,
+        target_verified: int | None = None,
+        attempt_cache_path: Path | None = None,
+        phase: str = "primary",
+    ) -> list[DownloadResult]:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        results: list[DownloadResult] = []
+        verified_count = 0
+        for record in records:
+            if phase == "retry" and results:
+                time.sleep(BROWSER_RETRY_INTERVAL_SEC)
+            result = self.fetch_one(context, record, run_dir)
+            results.append(result)
+            if result.ok and result.verified_match:
+                verified_count += 1
+            self._append_attempt(attempt_cache_path, result, phase)
+            self._write_results(run_dir / "summary_partial.json", results)
+            if target_verified and verified_count >= target_verified:
+                break
 
         self._write_results(run_dir / "summary.json", results)
         return results
@@ -413,9 +600,18 @@ class PublisherBatchDownloader:
         return target
 
     def _launch_context(self, profile_dir: str | Path | None = None):
-        from .cloakbrowser_compat import prepare_cloakbrowser_runtime
+        from .cloakbrowser_compat import (
+            BrowserPythonUnsupportedError,
+            ensure_browser_python_supported,
+            prepare_cloakbrowser_runtime,
+        )
 
         prepare_cloakbrowser_runtime()
+        try:
+            ensure_browser_python_supported()
+        except BrowserPythonUnsupportedError as exc:
+            logger.error("Browser workflow unavailable: %s", exc)
+            raise
         from cloakbrowser import launch_persistent_context
 
         profile_path = Path(profile_dir) if profile_dir else Path(self.config.chrome_profile_dir)
@@ -512,16 +708,29 @@ class PublisherBatchDownloader:
         return False
 
     def _carsi_portal_authenticated(self, page: Any) -> bool:
-        if self._is_human_login_page(page):
-            return False
         current_url = str(getattr(page, "url", "") or "")
         parsed = urlparse(current_url)
         host = (parsed.hostname or parsed.netloc or "").lower()
         if host != "ds.carsi.edu.cn":
             return False
+        text = self._body_text(page, 3_000).lower()
+        title_text = f"{self._title(page)} {text}".lower()
+        resource_markers = (
+            "application resources",
+            "my resources",
+            "logout",
+            "sign out",
+            "\u5e94\u7528\u8d44\u6e90",
+            "\u6211\u7684\u8d44\u6e90",
+            "\u9000\u51fa",
+            "\u6ce8\u9500",
+        )
+        if any(marker in title_text for marker in resource_markers):
+            return True
+        if self._is_human_login_page(page):
+            return False
         if "/login/" not in parsed.path.lower():
             return True
-        text = self._body_text(page, 3_000).lower()
         return any(
             marker in text
             for marker in (
@@ -536,7 +745,7 @@ class PublisherBatchDownloader:
         )
 
     def fetch_one(self, context: Any, record: PaperRecord, run_dir: Path) -> DownloadResult:
-        page = context.new_page()
+        page: Any | None = None
         result = DownloadResult(
             doi=record.doi,
             status="failed",
@@ -544,6 +753,26 @@ class PublisherBatchDownloader:
             article_url=self.profile.article_url(record.doi),
         )
         try:
+            if self.supplementary_only and self.profile.name.lower() == "elsevier":
+                saved_paths = self._download_elsevier_api_supplementary_materials(record, run_dir, result)
+                if saved_paths:
+                    result.status = "success"
+                    result.reason = ""
+                    result.state = "supplementary_downloaded"
+                    result.final_url = result.article_url
+                    result.size_bytes = sum(
+                        Path(path).stat().st_size
+                        for path in saved_paths
+                        if Path(path).exists()
+                    )
+                    (run_dir / f"{safe_name(record.doi)}.json").write_text(
+                        json.dumps({**asdict(result), "full_text": ""}, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    return result
+                self._event(result, "elsevier_api_supplementary_fallback", result.reason or "no_api_attachments")
+
+            page = context.new_page()
             self._event(result, "article_open", result.article_url)
             if not self._ensure_login(page, result):
                 if self._article_access_available(page):
@@ -576,6 +805,37 @@ class PublisherBatchDownloader:
             result.title = self._title(page)
             result.state = "article_loaded"
             self._hold_after_login(page, result)
+            supplementary_candidates = self._supplementary_candidates(page, record.doi)
+            if self.supplementary_only:
+                saved_paths = self._download_supplementary_materials(
+                    page,
+                    record,
+                    run_dir,
+                    result,
+                    candidates=supplementary_candidates,
+                )
+                result.final_url = page.url
+                result.title = self._title(page)
+                if saved_paths:
+                    result.status = "success"
+                    result.reason = ""
+                    result.state = "supplementary_downloaded"
+                    if not result.supplementary_paths:
+                        result.supplementary_paths = saved_paths
+                    result.size_bytes = sum(
+                        Path(path).stat().st_size
+                        for path in saved_paths
+                        if Path(path).exists()
+                    )
+                    (run_dir / f"{safe_name(record.doi)}.json").write_text(
+                        json.dumps({**asdict(result), "full_text": ""}, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    return result
+                result.reason = "supplementary_not_found" if not supplementary_candidates else "supplementary_not_captured"
+                result.state = result.reason
+                self._write_diagnostic(page, result, run_dir)
+                return result
             pdf_bytes, pdf_url = self._capture_pdf(page, record.doi, result)
             if not pdf_bytes:
                 if self._looks_logged_out(page):
@@ -636,6 +896,14 @@ class PublisherBatchDownloader:
             result.size_bytes = len(pdf_bytes)
             result.text_length = len(text or "")
             result.verified_match = self._text_matches_record(text, record, fallback_title=result.title)
+            if supplementary_candidates:
+                self._download_supplementary_materials(
+                    page,
+                    record,
+                    run_dir,
+                    result,
+                    candidates=supplementary_candidates,
+                )
             (run_dir / f"{safe_name(record.doi)}.json").write_text(
                 json.dumps({**asdict(result), "full_text": text}, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -644,14 +912,16 @@ class PublisherBatchDownloader:
         except Exception as exc:
             result.reason = f"{type(exc).__name__}: {exc}"
             result.state = "unexpected_error"
-            self._write_diagnostic(page, result, run_dir)
+            if page is not None:
+                self._write_diagnostic(page, result, run_dir)
             return result
         finally:
-            self._hold_after_run(page, result)
-            try:
-                page.close()
-            except Exception:
-                pass
+            if page is not None:
+                self._hold_after_run(page, result)
+                try:
+                    page.close()
+                except Exception:
+                    pass
 
     def _hold_after_login(self, page: Any, result: DownloadResult) -> None:
         if not self.post_login_hold_sec:
@@ -784,6 +1054,9 @@ class PublisherBatchDownloader:
             "are you a robot" in haystack
             or "verify you are human" in haystack
             or "checking your browser" in haystack
+            or "\u6b63\u5728\u8fdb\u884c\u5b89\u5168\u9a8c\u8bc1" in haystack
+            or "\u8bf7\u9a8c\u8bc1\u60a8\u662f\u771f\u4eba" in haystack
+            or "\u771f\u4eba\u9a8c\u8bc1" in haystack
             or "正在进行安全验证" in haystack
             or ("ray id:" in haystack and "cloudflare" in haystack)
         ):
@@ -853,6 +1126,10 @@ class PublisherBatchDownloader:
                 except Exception:
                     pass
                 detail = {"selector": selector, "text": text[:200], "href": href[:300]}
+                if self._is_non_sso_navigation_detail(detail, getattr(page, "url", "")):
+                    if result is not None:
+                        self._event(result, "sso_entry_ignored", json.dumps(detail, ensure_ascii=False))
+                    continue
                 try:
                     control.click(timeout=10_000, no_wait_after=True)
                 except Exception:
@@ -895,13 +1172,47 @@ class PublisherBatchDownloader:
                     el.getAttribute('aria-label') || '',
                     el.getAttribute('title') || ''
                   ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+                  const rawHrefOf = (el) => ((el.getAttribute('href') || el.getAttribute('formaction') || '') + '').trim();
+                  const hrefOf = (el) => {
+                    const raw = rawHrefOf(el);
+                    const href = ((el.href || raw || '') + '').trim();
+                    if (!href) return '';
+                    try { return new URL(href, location.href).href; } catch { return href; }
+                  };
+                  const isSamePageAnchor = (el) => {
+                    const raw = rawHrefOf(el);
+                    if (!raw) return false;
+                    if (raw.startsWith('#')) return true;
+                    try {
+                      const here = new URL(location.href);
+                      const target = new URL(raw, location.href);
+                      return Boolean(target.hash)
+                        && target.origin === here.origin
+                        && target.pathname === here.pathname
+                        && target.search === here.search;
+                    } catch {
+                      return false;
+                    }
+                  };
+                  const isNonSsoNavigation = (el) => {
+                    const text = textOf(el);
+                    const raw = rawHrefOf(el).toLowerCase();
+                    const href = hrefOf(el).toLowerCase();
+                    return text.includes('skip to main')
+                        || text.includes('skip navigation')
+                        || raw.startsWith('#')
+                        || href.includes('#main-content-focus')
+                        || isSamePageAnchor(el);
+                  };
                   const detailOf = (el) => ({
                     text: textOf(el).slice(0, 180),
-                    href: ((el.href || el.getAttribute('href') || '') + '').toLowerCase().slice(0, 240)
+                    href: hrefOf(el).toLowerCase().slice(0, 240),
+                    raw_href: rawHrefOf(el).toLowerCase().slice(0, 240)
                   });
                   const matches = (el) => {
                     const text = textOf(el);
-                    const href = ((el.href || el.getAttribute('href') || el.getAttribute('formaction') || '') + '').toLowerCase();
+                    const href = hrefOf(el).toLowerCase();
+                    if (isNonSsoNavigation(el)) return false;
                     if (text.length > 300 && !href.includes('ssostart')) return false;
                     return exactMarkers.some(marker => text.includes(marker) || href.includes(marker))
                         || markers.some(marker => text.includes(marker) || href.includes(marker))
@@ -912,6 +1223,7 @@ class PublisherBatchDownloader:
                       ? el
                       : (el.closest(clickableSelector) || el.querySelector(clickableSelector));
                     if (!target) return null;
+                    if (isNonSsoNavigation(target)) return null;
                     const detail = detailOf(el);
                     target.click();
                     return detail;
@@ -930,6 +1242,10 @@ class PublisherBatchDownloader:
             )
             if clicked:
                 if self._is_elsevier_homepage_entry(clicked):
+                    return False
+                if self._is_non_sso_navigation_detail(clicked, getattr(page, "url", "")):
+                    if result is not None:
+                        self._event(result, "sso_entry_ignored", json.dumps(clicked, ensure_ascii=False))
                     return False
                 if result is not None:
                     self._event(result, "sso_entry_clicked", json.dumps(clicked, ensure_ascii=False))
@@ -1072,6 +1388,42 @@ class PublisherBatchDownloader:
             "http://www.elsevier.com",
             "https://www.elsevier.com",
         }
+
+    def _is_non_sso_navigation_detail(self, detail: Any, current_url: str = "") -> bool:
+        if not isinstance(detail, dict):
+            return False
+        text = str(detail.get("text") or "").strip().lower()
+        hrefs = [
+            str(detail.get("raw_href") or detail.get("rawHref") or "").strip(),
+            str(detail.get("href") or "").strip(),
+        ]
+        if "skip to main" in text or "skip navigation" in text:
+            return True
+        for href in hrefs:
+            lower_href = href.lower()
+            if not lower_href:
+                continue
+            if lower_href.startswith("#") or "#main-content-focus" in lower_href:
+                return True
+        if not current_url:
+            return False
+        try:
+            current = urlparse(current_url)
+            for href in hrefs:
+                if not href:
+                    continue
+                target = urlparse(urljoin(current_url, href))
+                if (
+                    target.fragment
+                    and target.scheme == current.scheme
+                    and target.netloc == current.netloc
+                    and target.path == current.path
+                    and target.query == current.query
+                ):
+                    return True
+        except Exception:
+            return False
+        return False
 
     def _is_human_login_page(self, page: Any) -> bool:
         current_url = str(getattr(page, "url", "") or "")
@@ -1397,6 +1749,15 @@ class PublisherBatchDownloader:
                     inp.fill(self.institution_query)
                     self._event(result, "institution_search", selector)
                     time.sleep(2)
+                    if self.profile.name.lower() == "acs" and "pubs.acs.org/action/ssostart" in current_url.lower():
+                        try:
+                            inp.press("Enter", timeout=3_000)
+                        except TypeError:
+                            inp.press("Enter")
+                        self._event(result, "institution_search_submitted", selector)
+                        time.sleep(3)
+                        self._click_optional_continue(page, result)
+                        return True
                     if self._click_institution_search_result(page, result):
                         return True
                     try:
@@ -1513,7 +1874,13 @@ class PublisherBatchDownloader:
                   };
                   const sections = [...document.querySelectorAll('section,div,ul,ol')]
                     .filter(visible)
-                    .filter((el) => textOf(el).toLowerCase().includes('recent institution'))
+                    .filter((el) => {
+                      const sectionText = textOf(el).toLowerCase();
+                      if (!sectionText.includes('recent institution')) return false;
+                      if (sectionText.includes('no recent institution')) return false;
+                      if (sectionText.includes('find institution via federation')) return false;
+                      return sectionText.length < 5000;
+                    })
                     .sort((a, b) => {
                       const ar = a.getBoundingClientRect();
                       const br = b.getBoundingClientRect();
@@ -1544,6 +1911,9 @@ class PublisherBatchDownloader:
                     const target = controls[0];
                     if (!target) continue;
                     target.control.scrollIntoView({block: 'center', inline: 'center'});
+                    if (typeof target.control.focus === 'function') {
+                      try { target.control.focus({preventScroll: true}); } catch (_) { target.control.focus(); }
+                    }
                     target.control.click();
                     return {selector: 'recent-institution', text: target.text.slice(0, 200), score: Math.round(target.score)};
                   }
@@ -1554,11 +1924,27 @@ class PublisherBatchDownloader:
             )
             if isinstance(detail, dict) and detail.get("text"):
                 self._event(result, "institution_selected", json.dumps(detail, ensure_ascii=False))
+                self._confirm_recent_institution_selection(page, result)
                 self._click_optional_continue(page, result)
                 return True
         except Exception as exc:
             self._event(result, "recent_institution_error", f"{type(exc).__name__}: {exc}")
         return False
+
+    def _confirm_recent_institution_selection(self, page: Any, result: DownloadResult) -> None:
+        current_url = str(getattr(page, "url", "") or "").lower()
+        if "pubs.acs.org/action/ssostart" not in current_url:
+            return
+        keyboard = getattr(page, "keyboard", None)
+        press = getattr(keyboard, "press", None)
+        if not callable(press):
+            return
+        try:
+            press("Enter")
+            self._event(result, "institution_confirm_enter", "recent-institution")
+            time.sleep(2)
+        except Exception as exc:
+            self._event(result, "institution_confirm_error", f"{type(exc).__name__}: {exc}")
 
     def _select_ieee_institution(self, page: Any, result: DownloadResult) -> bool:
         if self.profile.name.lower() != "ieee":
@@ -1832,13 +2218,18 @@ class PublisherBatchDownloader:
                 captured["bytes"] = body
                 captured["url"] = final_url
                 return captured["bytes"], str(captured["url"])
-            if self._click_pdf_entry(page, result, doi=doi):
+            clicked_pdf_entry = self._click_pdf_entry(page, result, doi=doi)
+            if clicked_pdf_entry:
                 time.sleep(5)
+                self._wait_for_challenge(page, result)
                 if not captured["bytes"]:
                     body, final_url = self._fetch_page_state_pdf(page, doi=doi)
                     if body:
                         captured["bytes"] = body
                         captured["url"] = final_url
+                if self.profile.name.lower() == "acs" and not captured["bytes"]:
+                    self._event(result, "acs_pdf_click_no_capture", "skipped direct PDF fallback after article-page click")
+                    return captured["bytes"], str(captured["url"])
             for pdf_url in self._pdf_candidates(page, doi):
                 if captured["bytes"]:
                     break
@@ -2056,6 +2447,9 @@ class PublisherBatchDownloader:
         if doi and self.profile.name.lower() == "aps":
             if self._click_current_doi_pdf_entry(page, result, doi):
                 return True
+        if doi and self.profile.name.lower() == "acs":
+            if self._click_acs_current_doi_pdf_entry(page, result, doi):
+                return True
         if doi and self.profile.name.lower() == "wiley":
             if self._click_wiley_pdf_entry(page, result, doi):
                 return True
@@ -2084,6 +2478,16 @@ class PublisherBatchDownloader:
                     href = control.get_attribute("href", timeout=1_000) or ""
                 except Exception:
                     pass
+                if href and self._is_supplementary_url(href):
+                    continue
+                # Never treat a Buy/Cart/price CTA as the PDF entry — "Buy
+                # article PDF USD 39.95" matches every generic PDF selector
+                # (#13).
+                if _is_purchase_control(text, href):
+                    self._event(result, "pdf_entry_skipped_purchase", json.dumps(
+                        {"selector": selector, "text": text[:120], "href": href[:200]},
+                        ensure_ascii=False))
+                    continue
                 detail = {"selector": selector, "text": text[:200], "href": href[:300]}
                 control.click(timeout=10_000, no_wait_after=True)
                 self._event(result, "pdf_button_clicked", json.dumps(detail, ensure_ascii=False))
@@ -2116,6 +2520,9 @@ class PublisherBatchDownloader:
                     const href = ((el.href || el.getAttribute('href') || el.getAttribute('formaction') || '') + '').toLowerCase();
                     if (haystack.includes('reference') || haystack.includes('citation')) return false;
                     if (haystack.includes('download references')) return false;
+                    if (href.includes('/doi/suppl/') || href.includes('/suppl_file/') || haystack.includes('supporting information')) return false;
+                    const purchase = /\\bbuy\\b|purchase|add[- ]to[- ]cart|shopping[- ]cart|checkout|(?:usd|eur|gbp|cny|rmb)\\s?\\d|\\$\\s?\\d|￥\\s?\\d|¥\\s?\\d/i;
+                    if (purchase.test(haystack) || purchase.test(href)) return false;
                     return /(^|\\s)pdf(\\s|$)/i.test(textOf(el))
                       || haystack.includes('download pdf')
                       || haystack.includes('xpl-btn-pdf')
@@ -2194,6 +2601,88 @@ class PublisherBatchDownloader:
             if isinstance(detail, dict) and detail.get("text"):
                 self._event(result, "pdf_button_clicked", json.dumps(detail, ensure_ascii=False))
                 return True
+        except Exception as exc:
+            self._event(result, "pdf_button_error", f"{type(exc).__name__}: {exc}")
+        return False
+
+    def _click_acs_current_doi_pdf_entry(self, page: Any, result: DownloadResult, doi: str) -> bool:
+        try:
+            detail = page.evaluate(
+                """
+                (doi) => {
+                  const norm = (value) => (value || '').toString().replace(/\\s+/g, ' ').trim();
+                  const visible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                  };
+                  const hrefOf = (el) => {
+                    const raw = el.href || el.getAttribute('href') || el.getAttribute('formaction') || '';
+                    if (!raw) return '';
+                    try { return new URL(raw, location.href).href; } catch { return raw; }
+                  };
+                  const doiLower = doi.toLowerCase();
+                  const doiEscaped = encodeURIComponent(doi).toLowerCase();
+                  const controls = [...document.querySelectorAll('a,button,[role="button"]')]
+                    .filter(visible)
+                    .map((el) => {
+                      const rect = el.getBoundingClientRect();
+                      const text = norm(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '');
+                      const href = hrefOf(el);
+                      const lowerHref = href.toLowerCase();
+                      const haystack = `${text} ${href} ${el.className || ''} ${el.id || ''}`.toLowerCase();
+                      const currentDoi = lowerHref.includes(doiLower) || lowerHref.includes(doiEscaped);
+                      const currentPdf = currentDoi && (lowerHref.includes('/doi/pdf/') || lowerHref.includes('/doi/epdf/'));
+                      if (!currentPdf) return null;
+                      if (/supporting|supplement|references|citation/i.test(haystack)) return null;
+                      const textScore = /^pdf$/i.test(text) ? 120 : (/pdf/i.test(text) ? 70 : 0);
+                      const hrefScore = lowerHref.includes('/doi/pdf/') ? 50 : 25;
+                      const topScore = rect.top < window.innerHeight * 0.70 ? 10 : 0;
+                      return {
+                        text,
+                        href,
+                        x: rect.left + rect.width / 2,
+                        y: rect.top + rect.height / 2,
+                        score: textScore + hrefScore + topScore - Math.max(0, rect.top / 1000)
+                      };
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => b.score - a.score);
+                  const target = controls[0];
+                  if (!target) return null;
+                  return {
+                    selector: 'acs-current-doi-pdf',
+                    text: target.text.slice(0, 200),
+                    href: target.href.slice(0, 500),
+                    x: target.x,
+                    y: target.y,
+                    score: Math.round(target.score)
+                  };
+                }
+                """,
+                doi,
+            )
+            if not (isinstance(detail, dict) and detail.get("href")):
+                return False
+            x = detail.get("x")
+            y = detail.get("y")
+            if isinstance(x, (int, float)) and isinstance(y, (int, float)) and hasattr(page, "mouse"):
+                page.mouse.click(float(x), float(y))
+            else:
+                page.evaluate(
+                    """
+                    (href) => {
+                      const target = [...document.querySelectorAll('a,button,[role="button"]')]
+                        .find((el) => ((el.href || el.getAttribute('href') || el.getAttribute('formaction') || '') + '') === href);
+                      if (!target) return false;
+                      target.click();
+                      return true;
+                    }
+                    """,
+                    str(detail["href"]),
+                )
+            self._event(result, "pdf_button_clicked", json.dumps(detail, ensure_ascii=False))
+            return True
         except Exception as exc:
             self._event(result, "pdf_button_error", f"{type(exc).__name__}: {exc}")
         return False
@@ -2533,6 +3022,503 @@ class PublisherBatchDownloader:
             pass
         return headers
 
+    def _supplementary_candidates(self, page: Any, doi: str) -> list[str]:
+        if not self.include_supplementary:
+            return []
+        candidates: list[str] = []
+        try:
+            found = page.evaluate(
+                """
+                (rules) => {
+                  const out = [];
+                  const supplementaryMarkers = rules.supplementaryMarkers.map(marker => marker.toLowerCase());
+                  const textMarkers = [
+                    'appendix',
+                    'appendices',
+                    'additional file',
+                    'electronic supplementary information',
+                    'supplement',
+                    'supplemental',
+                    'supplementary',
+                    'supporting information',
+                    'supporting material'
+                  ];
+                  const pushUrl = (raw, supplementary) => {
+                    if (!raw) return;
+                    let url = raw;
+                    try { url = new URL(raw, location.href).href; } catch {}
+                    out.push({url, supplementary: Boolean(supplementary)});
+                  };
+                  const textOf = (el) => [
+                    el.innerText || '',
+                    el.textContent || '',
+                    el.getAttribute('aria-label') || '',
+                    el.getAttribute('title') || '',
+                    el.getAttribute('download') || ''
+                  ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+                  for (const meta of document.querySelectorAll('meta')) {
+                    const key = ((meta.getAttribute('name') || meta.getAttribute('property') || '') + '').toLowerCase();
+                    const content = meta.getAttribute('content') || '';
+                    const haystack = `${key} ${content}`.toLowerCase();
+                    const supplementary = textMarkers.some(marker => haystack.includes(marker))
+                      || supplementaryMarkers.some(marker => haystack.includes(marker));
+                    if (supplementary) {
+                      pushUrl(content, true);
+                    }
+                  }
+                  for (const node of document.querySelectorAll('a,link,iframe,embed,object')) {
+                    const raw = node.href || node.src || node.getAttribute('href') || node.getAttribute('src') || node.getAttribute('data') || '';
+                    if (!raw) continue;
+                    const href = raw.toLowerCase();
+                    const haystack = `${href} ${textOf(node)}`;
+                    const supplementary = textMarkers.some(marker => haystack.includes(marker))
+                      || supplementaryMarkers.some(marker => haystack.includes(marker));
+                    if (supplementary) {
+                      pushUrl(raw, true);
+                    }
+                  }
+                  const seen = new Set();
+                  return out.filter((item) => {
+                    if (!item.url || seen.has(item.url)) return false;
+                    seen.add(item.url);
+                    return true;
+                  });
+                }
+                """,
+                {"supplementaryMarkers": list(self.profile.supplementary_url_markers)},
+            )
+            if isinstance(found, list):
+                for item in found:
+                    if isinstance(item, dict):
+                        url = str(item.get("url") or "")
+                        supplementary = bool(item.get("supplementary"))
+                    else:
+                        url = str(item or "") if isinstance(item, str) else ""
+                        supplementary = False
+                    if not url.startswith("http"):
+                        continue
+                    if not supplementary and not self._is_supplementary_url(url):
+                        continue
+                    if not belongs_to_current_article(
+                        self.profile,
+                        url,
+                        doi=doi,
+                        source_url=str(getattr(page, "url", "") or ""),
+                    ):
+                        continue
+                    candidates.append(url)
+        except Exception:
+            pass
+        if self.supplementary_fast:
+            candidates.extend(self._science_standard_supplementary_candidates(doi))
+        return list(dict.fromkeys(candidates))
+
+    def _science_standard_supplementary_candidates(self, doi: str) -> list[str]:
+        if self.profile.name.lower() != "science":
+            return []
+        normalized = doi.strip()
+        doi_suffix = normalized.rsplit("/", 1)[-1]
+        suffix_lower = doi_suffix.lower()
+        aaas_suffix_prefixes = (
+            "science.",
+            "sciadv.",
+            "sciimmunol.",
+            "scirobotics.",
+            "scisignal.",
+            "scitranslmed.",
+        )
+        if not normalized.lower().startswith("10.1126/"):
+            return []
+        if not doi_suffix or not suffix_lower.startswith(aaas_suffix_prefixes):
+            return []
+        filenames = [f"{doi_suffix}_sm.pdf"]
+        short_suffix = doi_suffix.split(".", 1)[-1] if "." in doi_suffix else ""
+        if short_suffix:
+            filenames.append(f"{short_suffix}_sm.pdf")
+        return [
+            f"https://www.science.org/doi/suppl/{normalized}/suppl_file/{filename}"
+            for filename in dict.fromkeys(filenames)
+        ]
+
+    def _download_supplementary_materials(
+        self,
+        page: Any,
+        record: PaperRecord,
+        run_dir: Path,
+        result: DownloadResult,
+        *,
+        candidates: list[str] | None = None,
+    ) -> list[str]:
+        if not self.include_supplementary:
+            return []
+        urls = list(candidates) if candidates is not None else self._supplementary_candidates(page, record.doi)
+        if not urls:
+            return []
+        supplementary_dir = run_dir / "supplementary" / safe_name(record.doi)
+        supplementary_dir.mkdir(parents=True, exist_ok=True)
+        saved_paths: list[str] = []
+        saved_urls: list[str] = []
+        seen_final_urls: set[str] = set()
+        seen_body_hashes: set[str] = set()
+        for url in urls:
+            if self._is_page_anchor_only(url):
+                continue
+            body, final_url, content_type = self._fetch_supplementary_url_with_browser_state(url, page)
+            if not body:
+                body, final_url, content_type = self._fetch_supplementary_url_via_browser_click(url, page)
+            if not body:
+                self._event(result, "supplementary_download_failed", url)
+                continue
+            normalized_final_url = (final_url or url).strip()
+            body_hash = hashlib.sha256(body).hexdigest()
+            if normalized_final_url in seen_final_urls or body_hash in seen_body_hashes:
+                self._event(result, "supplementary_duplicate_skipped", normalized_final_url or url)
+                continue
+            seen_final_urls.add(normalized_final_url)
+            seen_body_hashes.add(body_hash)
+            index = len(saved_paths) + 1
+            filename = self._supplementary_filename(record.doi, index, final_url or url, content_type)
+            path = supplementary_dir / filename
+            path.write_bytes(body)
+            saved_paths.append(str(path))
+            saved_urls.append(final_url or url)
+            self._event(result, "supplementary_downloaded", str(path))
+        result.supplementary_paths = saved_paths
+        result.supplementary_urls = saved_urls
+        return saved_paths
+
+    def _download_elsevier_api_supplementary_materials(
+        self,
+        record: PaperRecord,
+        run_dir: Path,
+        result: DownloadResult,
+    ) -> list[str]:
+        try:
+            from .sources import elsevier_api
+        except Exception as exc:
+            result.reason = f"elsevier_api_unavailable: {type(exc).__name__}"
+            return []
+
+        api_key = elsevier_api.get_api_key(self.config.elsevier_api_key)
+        if not api_key:
+            result.reason = "elsevier_api_key_missing"
+            return []
+
+        try:
+            objects = elsevier_api.fetch_supplementary_objects(
+                record.doi,
+                api_key=api_key,
+                inst_token=self.config.elsevier_inst_token,
+                proxy_url=self.config.proxy_url,
+            )
+        except Exception as exc:
+            result.reason = f"elsevier_api_supplementary_error: {type(exc).__name__}: {exc}"
+            return []
+
+        if not objects:
+            result.reason = "elsevier_api_supplementary_not_found"
+            return []
+
+        supplementary_dir = run_dir / "supplementary" / safe_name(record.doi)
+        supplementary_dir.mkdir(parents=True, exist_ok=True)
+        saved_paths: list[str] = []
+        saved_urls: list[str] = []
+        seen_body_hashes: set[str] = set()
+        for obj in objects:
+            body_hash = hashlib.sha256(obj.data).hexdigest()
+            if body_hash in seen_body_hashes:
+                self._event(result, "supplementary_duplicate_skipped", obj.eid)
+                continue
+            seen_body_hashes.add(body_hash)
+            filename = self._safe_supplementary_asset_filename(obj.filename, len(saved_paths) + 1)
+            path = supplementary_dir / filename
+            path.write_bytes(obj.data)
+            saved_paths.append(str(path))
+            saved_urls.append(obj.url)
+            self._event(result, "supplementary_downloaded", str(path))
+
+        result.supplementary_paths = saved_paths
+        result.supplementary_urls = saved_urls
+        return saved_paths
+
+    @staticmethod
+    def _safe_supplementary_asset_filename(filename: str, index: int) -> str:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", filename.strip())
+        if not safe:
+            return f"supplementary_{index:02d}.bin"
+        if "." not in Path(safe).name:
+            return f"{safe}.bin"
+        return safe
+
+    @staticmethod
+    def _is_page_anchor_only(url: str) -> bool:
+        parsed = urlparse(url)
+        if not parsed.fragment:
+            return False
+        path = parsed.path.lower()
+        downloadable_suffixes = (
+            ".pdf",
+            ".zip",
+            ".doc",
+            ".docx",
+            ".xls",
+            ".xlsx",
+            ".csv",
+            ".txt",
+            ".ppt",
+            ".pptx",
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".tif",
+            ".tiff",
+        )
+        return not path.endswith(downloadable_suffixes)
+
+    def _fetch_supplementary_url_with_browser_state(self, url: str, page: Any) -> tuple[bytes | None, str, str]:
+        try:
+            signature = inspect.signature(self._fetch_supplementary_url)
+        except (TypeError, ValueError):
+            return self._fetch_supplementary_url(url)
+        accepts_page = "page" in signature.parameters or any(
+            param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()
+        )
+        if accepts_page:
+            return self._fetch_supplementary_url(url, page=page)
+        return self._fetch_supplementary_url(url)
+
+    def _fetch_supplementary_url(self, url: str, *, page: Any | None = None) -> tuple[bytes | None, str, str]:
+        headers = self._pdf_request_headers(url, page)
+        try:
+            resp = requests.get(
+                url,
+                headers=headers,
+                timeout=(10, 60),
+                allow_redirects=True,
+            )
+            if resp.status_code >= 400:
+                return None, resp.url, resp.headers.get("content-type", "")
+            content_type = resp.headers.get("content-type", "")
+            if "text/html" in content_type.lower() and not urlparse(resp.url).path.lower().endswith((".html", ".htm")):
+                return None, resp.url, content_type
+            if resp.content:
+                return resp.content, resp.url, content_type
+        except Exception:
+            return None, url, ""
+        return None, resp.url, resp.headers.get("content-type", "")
+
+    def _supplementary_timeout_ms(self) -> int:
+        timeout_ms = max(30_000, int(self.pdf_timeout_ms or 0))
+        if self.supplementary_fast:
+            return min(timeout_ms, 90_000)
+        return timeout_ms
+
+    def _fetch_supplementary_url_via_browser_click(
+        self,
+        url: str,
+        page: Any | None,
+    ) -> tuple[bytes | None, str, str]:
+        if page is None:
+            return None, url, ""
+        required_attrs = ("evaluate", "locator", "expect_download")
+        if any(not hasattr(page, attr) for attr in required_attrs):
+            return None, url, ""
+
+        captured: dict[str, Any] = {}
+
+        def capture_pdf_response(response: Any) -> None:
+            try:
+                response_url = str(getattr(response, "url", "") or "")
+                content_type = str(getattr(response, "headers", {}).get("content-type", "") or "")
+                status = int(getattr(response, "status", 0) or 0)
+                if status >= 400 or "application/pdf" not in content_type.lower():
+                    return
+                if not self._same_supplementary_download(url, response_url):
+                    return
+                body = response.body()
+                if body:
+                    captured["body"] = body
+                    captured["url"] = response_url
+                    captured["content_type"] = content_type
+            except Exception:
+                return
+
+        attached = False
+        try:
+            if hasattr(page, "on"):
+                page.on("response", capture_pdf_response)
+                attached = True
+            found = page.evaluate(
+                """
+                (target) => {
+                  const attr = 'data-instsci-supplementary-click-target';
+                  for (const node of document.querySelectorAll(`[${attr}]`)) {
+                    node.removeAttribute(attr);
+                  }
+                  const normalize = (value) => {
+                    try { return decodeURIComponent(value || '').toLowerCase(); }
+                    catch { return String(value || '').toLowerCase(); }
+                  };
+                  const targetUrl = normalize(target);
+                  const anchors = Array.from(document.querySelectorAll('a[href]'));
+                  const match = anchors.find((anchor) => {
+                    const href = anchor.href || '';
+                    const raw = anchor.getAttribute('href') || '';
+                    return normalize(href) === targetUrl || normalize(raw) === targetUrl;
+                  });
+                  if (!match) return false;
+                  match.setAttribute(attr, '1');
+                  try { match.scrollIntoView({block: 'center', inline: 'center'}); } catch {}
+                  return true;
+                }
+                """,
+                url,
+            )
+            timeout_ms = self._supplementary_timeout_ms()
+            selectors: list[str] = []
+            source_name = Path(urlparse(url).path).name
+            if source_name:
+                selectors.append(f'a[href*="{self._css_attr_value(source_name)}"]')
+            source_path = urlparse(url).path
+            if source_path:
+                selectors.append(f'a[href*="{self._css_attr_value(source_path)}"]')
+            if found:
+                selectors.append('[data-instsci-supplementary-click-target="1"]')
+            for selector in list(dict.fromkeys(selectors)):
+                locator = page.locator(selector)
+                try:
+                    if hasattr(locator, "count") and locator.count() < 1:
+                        continue
+                except Exception:
+                    pass
+                temp_path: Path | None = None
+                try:
+                    with page.expect_download(timeout=timeout_ms) as download_info:
+                        self._first_locator(locator).click(timeout=30_000)
+                    download = download_info.value
+                    suggested_filename = str(getattr(download, "suggested_filename", "") or "")
+                    suffix = Path(suggested_filename).suffix or ".bin"
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                        temp_path = Path(tmp.name)
+                    download.save_as(str(temp_path))
+                    body = temp_path.read_bytes()
+                    final_url = str(getattr(download, "url", "") or captured.get("url") or url)
+                    content_type = str(
+                        captured.get("content_type")
+                        or mimetypes.guess_type(suggested_filename)[0]
+                        or mimetypes.guess_type(final_url)[0]
+                        or ""
+                    )
+                    if body:
+                        return body, final_url, content_type
+                except Exception:
+                    if captured.get("body"):
+                        return (
+                            captured["body"],
+                            str(captured.get("url") or url),
+                            str(captured.get("content_type") or ""),
+                        )
+                    try:
+                        self._click_supplementary_link_with_script(page, url)
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(page, "wait_for_timeout"):
+                            page.wait_for_timeout(min(30_000, timeout_ms))
+                    except Exception:
+                        pass
+                    if captured.get("body"):
+                        return (
+                            captured["body"],
+                            str(captured.get("url") or url),
+                            str(captured.get("content_type") or ""),
+                        )
+                finally:
+                    if temp_path is not None:
+                        try:
+                            temp_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+        finally:
+            if attached and hasattr(page, "off"):
+                try:
+                    page.off("response", capture_pdf_response)
+                except Exception:
+                    pass
+        return None, url, ""
+
+    @staticmethod
+    def _first_locator(locator: Any) -> Any:
+        first = getattr(locator, "first", None)
+        if first is None:
+            return locator
+        if callable(first):
+            return first()
+        return first
+
+    @staticmethod
+    def _click_supplementary_link_with_script(page: Any, url: str) -> bool:
+        return bool(
+            page.evaluate(
+                """
+                (target) => {
+                  const normalize = (value) => {
+                    try { return decodeURIComponent(value || '').toLowerCase(); }
+                    catch { return String(value || '').toLowerCase(); }
+                  };
+                  let filename = '';
+                  try { filename = new URL(target, location.href).pathname.split('/').pop().toLowerCase(); }
+                  catch {}
+                  const targetUrl = normalize(target);
+                  const anchors = Array.from(document.querySelectorAll('a[href]'));
+                  const match = anchors.find((anchor) => {
+                    const href = anchor.href || '';
+                    const raw = anchor.getAttribute('href') || '';
+                    const haystack = `${normalize(href)} ${normalize(raw)}`;
+                    return normalize(href) === targetUrl
+                      || normalize(raw) === targetUrl
+                      || (filename && haystack.includes(filename));
+                  });
+                  if (!match) return false;
+                  try { match.scrollIntoView({block: 'center', inline: 'center'}); } catch {}
+                  match.click();
+                  return true;
+                }
+                """,
+                url,
+            )
+        )
+
+    @staticmethod
+    def _same_supplementary_download(source_url: str, response_url: str) -> bool:
+        source = source_url.lower()
+        response = response_url.lower()
+        if source == response:
+            return True
+        source_path = urlparse(source_url).path.lower()
+        response_path = urlparse(response_url).path.lower()
+        source_name = Path(source_path).name
+        if source_name and source_name in response:
+            return True
+        if "downloadsupplement" in response:
+            source_qs = parse_qs(urlparse(source_url).query)
+            response_qs = parse_qs(urlparse(response_url).query)
+            source_file = source_name or (source_qs.get("file") or [""])[0].lower()
+            response_file = (response_qs.get("file") or [""])[0].lower()
+            return bool(source_file and source_file == response_file)
+        return False
+
+    @staticmethod
+    def _css_attr_value(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
+    def _supplementary_filename(self, doi: str, index: int, url: str, content_type: str = "") -> str:
+        path_suffix = Path(urlparse(url).path).suffix.lower()
+        if not re.fullmatch(r"\.[a-z0-9]{1,8}", path_suffix or ""):
+            guessed = mimetypes.guess_extension((content_type or "").split(";", 1)[0].strip().lower())
+            path_suffix = guessed if guessed and re.fullmatch(r"\.[a-z0-9]{1,8}", guessed) else ".bin"
+        return f"{safe_name(doi)}_supplementary_{index:02d}{path_suffix}"
+
     def _pdf_candidates(self, page: Any, doi: str) -> list[str]:
         candidates: list[str] = []
         try:
@@ -2640,26 +3626,55 @@ class PublisherBatchDownloader:
         return doi_lower in lower_url or doi_lower.replace("/", "%2f") in lower_url
 
     def _wait_for_challenge(self, page: Any, result: DownloadResult, *, deadline: float | None = None) -> bool:
-        wait_interval_sec = 5
+        wait_interval_sec = CHALLENGE_QUIET_WAIT_SEC
+        started_at = time.time()
         if deadline is None:
-            max_checks = max(8, int(max(self.login_timeout_sec, wait_interval_sec) / wait_interval_sec))
+            end_at = started_at + max(0.0, float(self.login_timeout_sec))
         else:
-            remaining = max(0.0, deadline - time.time())
-            max_checks = max(1, int(max(remaining, wait_interval_sec) / wait_interval_sec))
+            end_at = deadline
+        budget_sec = max(0.0, end_at - started_at)
+        max_checks = max(1, int(math.ceil(budget_sec / wait_interval_sec))) if budget_sec else 1
         waited = False
         for index in range(max_checks):
             if self._is_challenge_page(page):
                 if not waited:
                     self._event(result, "challenge_manual_wait", "complete verification in visible browser")
+                    self._notify_manual_challenge(page, result)
                 waited = True
                 result.state = "challenge_or_viewer_timeout"
                 self._event(result, "challenge_wait", str(index + 1))
-                time.sleep(wait_interval_sec)
+                remaining = max(0.0, end_at - time.time())
+                if remaining <= 0:
+                    break
+                # Some WAF pages restart if browser automation polls them too aggressively.
+                time.sleep(min(wait_interval_sec, remaining))
                 continue
             if waited:
                 self._event(result, "challenge_resolved", getattr(page, "url", ""))
             return True
-        return not self._is_challenge_page(page)
+        cleared = not self._is_challenge_page(page)
+        if cleared and waited:
+            self._event(result, "challenge_resolved", getattr(page, "url", ""))
+        return cleared
+
+    def _notify_manual_challenge(self, page: Any, result: DownloadResult) -> bool:
+        now = time.monotonic()
+        if now - self._manual_challenge_alert_last_at < 300:
+            return False
+        self._manual_challenge_alert_last_at = now
+        host = urlparse(str(getattr(page, "url", "") or "")).hostname or self.profile.name
+        message = (
+            f"{self.profile.name} \u51fa\u73b0 Cloudflare/CAPTCHA/\u771f\u4eba\u9a8c\u8bc1\uff0c"
+            "\u9700\u8981\u4eba\u5de5\u5904\u7406\u3002\n\n"
+            f"DOI: {result.doi or 'unknown'}\n"
+            f"\u7ad9\u70b9: {host}\n\n"
+            "\u8bf7\u5728\u53ef\u89c1 CloakBrowser \u7a97\u53e3\u4e2d\u5b8c\u6210\u9a8c\u8bc1\uff1b"
+            "\u5b8c\u6210\u540e\u4e0d\u8981\u5173\u95ed\u6d4f\u89c8\u5668\uff0cInstSci \u4f1a\u7ee7\u7eed\u3002"
+        )
+        if show_desktop_alert("InstSci \u9700\u8981\u4eba\u5de5\u9a8c\u8bc1", message):
+            self._event(result, "desktop_alert", "manual_challenge")
+            return True
+        return False
 
     def _is_challenge_page(self, page: Any) -> bool:
         haystack = f"{self._title(page)} {self._body_text(page, 1_200)}".lower()
@@ -2667,7 +3682,10 @@ class PublisherBatchDownloader:
             "just a moment",
             "attention required",
             "verify you are human",
+            "\u8bf7\u9a8c\u8bc1\u60a8\u662f\u771f\u4eba",
             "checking your browser",
+            "\u6b63\u5728\u8fdb\u884c\u5b89\u5168\u9a8c\u8bc1",
+            "\u771f\u4eba\u9a8c\u8bc1",
             "are you a robot",
             "please confirm you are a human",
         )
@@ -2678,6 +3696,9 @@ class PublisherBatchDownloader:
             or "security verification" in haystack
             or "security service" in haystack
             or "not a robot" in haystack
+            or "\u5b89\u5168\u8d28\u8be2" in haystack
+            or "\u5b89\u5168\u9a8c\u8bc1" in haystack
+            or "\u771f\u4eba" in haystack
             or "瀹夊叏楠岃瘉" in haystack
         )
 
@@ -2700,6 +3721,12 @@ class PublisherBatchDownloader:
         if self._has_publisher_institution_session(page):
             return False
         if self._is_success_article_url(getattr(page, "url", "")):
+            # Hard paywall CTAs (Nature's "Buy article PDF USD 39.95") are a
+            # login wall just as much as an SSO link — a paywall page must
+            # send the flow to institutional login, not to the buy button
+            # (#13). Soft merchandising/footer text like RSC's "purchase
+            # options" or a stray OpenAthens help link deliberately matches
+            # none of these: on an article URL only the hard walls decide.
             hard_wall_markers = (
                 "access this article",
                 "not registered by an institution",
@@ -2707,17 +3734,26 @@ class PublisherBatchDownloader:
                 "provide your credentials",
                 "get access",
                 "log in via your institution",
+                "log in via an institution",
                 "access through your organization",
                 "access through your institution",
+                "access through institution",
                 "institutional access",
                 "no access",
                 "purchase pdf",
                 "purchase this article",
+                "buy article pdf",
+                "buy pdf",
+                "buy this article",
+                "add to cart",
+                "shopping cart",
                 "sign in to continue reading",
                 "subscribe to unlock",
                 "you do not have access to this pdf",
             )
-            return any(marker in text for marker in hard_wall_markers)
+            if any(marker in text for marker in hard_wall_markers):
+                return True
+            return bool(re.search(r"(?:usd|eur|gbp|cny|rmb)\s?\d|\$\s?\d+\.|￥\s?\d|¥\s?\d", text))
         return any(marker in text for marker in self.profile.sso_text_markers)
 
     def _article_access_available(self, page: Any) -> bool:
@@ -2877,6 +3913,7 @@ class PublisherBatchDownloader:
     ) -> dict[str, Any]:
         complete_dir = run_dir / "complete"
         pdf_dir = complete_dir / "pdfs"
+        supplementary_root = complete_dir / "supplementary"
         pdf_dir.mkdir(parents=True, exist_ok=True)
         missing_reasons = missing_reasons or {}
         result_by_doi = {result.doi.lower(): result for result in results if result.ok}
@@ -2894,6 +3931,8 @@ class PublisherBatchDownloader:
                 "size_bytes": 0,
                 "text_length": 0,
                 "verified_match": False,
+                "supplementary_count": 0,
+                "supplementary_paths": [],
             }
             if result and result.pdf_path:
                 src = Path(result.pdf_path)
@@ -2910,6 +3949,27 @@ class PublisherBatchDownloader:
                             "size_bytes": dst.stat().st_size,
                             "text_length": len(text or ""),
                             "verified_match": verified_match,
+                        }
+                    )
+            if result and result.supplementary_paths:
+                supplementary_paths: list[str] = []
+                for supplementary_path in result.supplementary_paths:
+                    supplementary_src = Path(supplementary_path)
+                    if not supplementary_src.exists():
+                        continue
+                    supplementary_dst_dir = supplementary_root / safe_name(record.doi)
+                    supplementary_dst_dir.mkdir(parents=True, exist_ok=True)
+                    supplementary_dst = supplementary_dst_dir / supplementary_src.name
+                    supplementary_dst.write_bytes(supplementary_src.read_bytes())
+                    supplementary_paths.append(str(supplementary_dst))
+                item["supplementary_count"] = len(supplementary_paths)
+                item["supplementary_paths"] = supplementary_paths
+                if self.supplementary_only and supplementary_paths and not item["pdf_path"]:
+                    item.update(
+                        {
+                            "status": "success",
+                            "reason": result.reason,
+                            "size_bytes": sum(Path(path).stat().st_size for path in supplementary_paths),
                         }
                     )
             manifest.append(item)
@@ -2930,6 +3990,7 @@ class PublisherBatchDownloader:
             "missing": sum(1 for item in manifest if item["status"] == "missing"),
             "unverified": sum(1 for item in manifest if item["status"] == "unverified"),
             "verified_match": sum(1 for item in manifest if item["verified_match"]),
+            "supplementary_count": sum(int(item.get("supplementary_count") or 0) for item in manifest),
             "pdf_dir": str(pdf_dir),
             "manifest": str(complete_dir / "manifest.csv"),
         }
@@ -2986,6 +4047,9 @@ class ACSCloakBatchDownloader(PublisherBatchDownloader):
         post_login_hold_sec: int = 0,
         post_run_hold_sec: int = 0,
         carsi_portal_preauth: bool = False,
+        include_supplementary: bool = False,
+        supplementary_only: bool = False,
+        supplementary_fast: bool = False,
     ) -> None:
         super().__init__(
             config,
@@ -2997,4 +4061,7 @@ class ACSCloakBatchDownloader(PublisherBatchDownloader):
             post_login_hold_sec=post_login_hold_sec,
             post_run_hold_sec=post_run_hold_sec,
             carsi_portal_preauth=carsi_portal_preauth,
+            include_supplementary=include_supplementary,
+            supplementary_only=supplementary_only,
+            supplementary_fast=supplementary_fast,
         )

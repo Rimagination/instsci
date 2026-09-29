@@ -1,11 +1,11 @@
 """Paper search via Semantic Scholar API."""
 
 import logging
-import os
-import time
 from dataclasses import dataclass, field
 
 import requests
+
+from ..http_utils import request_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -14,31 +14,17 @@ S2_FIELDS = "title,authors,year,abstract,externalIds,journal,citationCount,url"
 MAX_RETRIES = 3
 
 
-_SSL_VERIFY = not (os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or
-                   os.environ.get("http_proxy") or os.environ.get("https_proxy"))
-
-
 def _request_with_retry(url: str, params: dict) -> dict | None:
-    """Make a GET request with retry on 429 rate limit."""
-    for attempt in range(MAX_RETRIES):
-        try:
-            resp = requests.get(url, params=params, timeout=15, verify=_SSL_VERIFY)
+    """Use the shared cooldown policy for Semantic Scholar metadata reads."""
+    try:
+        with request_with_retry("GET", url, params=params, timeout=15, max_retries=MAX_RETRIES - 1) as resp:
             if resp.status_code == 404:
                 return None
-            if resp.status_code == 429:
-                wait = 2 ** (attempt + 1)
-                logger.warning("Rate limited by Semantic Scholar, retrying in %ds...", wait)
-                time.sleep(wait)
-                continue
             resp.raise_for_status()
             return resp.json()
-        except requests.RequestException as e:
-            logger.error("Semantic Scholar request failed: %s", e)
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(2)
-            else:
-                return None
-    return None
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("Semantic Scholar request failed: %s", exc)
+        return None
 
 
 @dataclass

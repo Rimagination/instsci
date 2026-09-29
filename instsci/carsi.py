@@ -5,12 +5,16 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import requests
 
 try:
-    from .cloakbrowser_compat import prepare_cloakbrowser_runtime
+    from .cloakbrowser_compat import (
+        ensure_browser_python_supported,
+        prepare_cloakbrowser_runtime,
+    )
     prepare_cloakbrowser_runtime()
     from cloakbrowser import launch
     _HAS_CLOAKBROWSER = True
@@ -25,6 +29,36 @@ from .session_store import CookieStore
 logger = logging.getLogger(__name__)
 
 _PUBLISHER_CONFIGS_FILE = Path(__file__).parent / "data" / "publisher_carsi.json"
+
+_ERROR_PAGE_TITLE_MARKERS = (
+    "page not found",
+    "404 not found",
+    "404 error",
+    "sorry, the page you requested",
+    "oops",
+    "无法访问",
+    "页面不存在",
+)
+
+
+def _looks_like_error_page(page: Any) -> bool:
+    """True when the browser landed on a publisher error/404 page.
+
+    Used to surface a stale configured login_url as a clear adapter error
+    instead of silently waiting out the whole SSO timeout on a 404 (#10).
+    """
+    try:
+        title = (page.title() or "").lower()
+        body = ""
+        try:
+            body = (page.locator("body").inner_text(timeout=2_000) or "").lower()[:1_000]
+        except Exception:
+            pass
+    except Exception:
+        return False
+    return any(marker in title for marker in _ERROR_PAGE_TITLE_MARKERS) or (
+        "404" in title and "not found" in title
+    ) or any(marker in body[:400] for marker in _ERROR_PAGE_TITLE_MARKERS[:4])
 
 
 def _institution_result_click_script(result_selector: str, institution: str, extra_aliases: list[str] | None = None) -> str:
@@ -143,13 +177,17 @@ class CARSIClient:
         if not cfg:
             return False
         sess = self._get_session(publisher)
+        # Validate against the publisher's own domain, not login_url: the
+        # current WAYF entry pages return 200 for everyone, so they can't
+        # tell a live session from an expired one.
         try:
-            resp = sess.get(cfg.login_url, timeout=15, allow_redirects=True)
+            test_url = f"https://{cfg.domains[0]}/"
+            resp = sess.get(test_url, timeout=15, allow_redirects=True)
             url_lower = resp.url.lower()
-            if "login" in url_lower and "institutional" not in url_lower:
+            sso_keywords = ("wayf", "shibboleth", "saml", "institutional", "ssostart", "/login", "idp.")
+            if any(keyword in url_lower for keyword in sso_keywords):
                 return False
-            if resp.status_code == 200 and "institutional-login" not in url_lower:
-                return True
+            return resp.status_code == 200
         except requests.RequestException as e:
             logger.warning("CARSI session validation failed for %s: %s", publisher, e)
         return False
@@ -182,6 +220,8 @@ class CARSIClient:
 
         browser = None
         try:
+            prepare_cloakbrowser_runtime()
+            ensure_browser_python_supported()
             browser = launch(
                 headless=False, humanize=True,
                 args=["--disable-features=CrossOriginOpenerPolicy"],
@@ -192,6 +232,18 @@ class CARSIClient:
             # Navigate to publisher's institutional login page
             page.goto(cfg.login_url, wait_until="domcontentloaded")
             print(f"  Browser opened at: {cfg.login_url}")
+
+            # Fail fast when the configured entry has gone stale instead of
+            # silently parking on a publisher 404 for the whole wait (#10).
+            if _looks_like_error_page(page):
+                logger.error(
+                    "Institutional login entry for %s appears stale (landed on an error page): %s",
+                    publisher, page.url,
+                )
+                print(f"  登录入口疑似失效（落地错误页）：{page.url}")
+                print("  请在文章页手动点击 'Access through your institution' 走 SSO，"
+                      "或到 instsci/data/publisher_carsi.json 更新 login_url 后重试。")
+                return False
 
             # Try to search for the university if a search selector is available
             if cfg.search_selector and self.config.carsi_idp_name:

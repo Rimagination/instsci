@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from .config import DEFAULT_BASE_DIR
 from .session_broker import broker_dir, broker_is_running
+from .retry_policy import failure_category
 
 
 JOBS_ROOT = DEFAULT_BASE_DIR / "jobs"
@@ -65,6 +66,13 @@ def create_job(
     post_login_hold: int,
     post_run_hold: int,
     carsi_portal_preauth: bool = False,
+    include_supplementary: bool = False,
+    supplementary_only: bool = False,
+    supplementary_fast: bool = False,
+    retry_failed: bool = True,
+    target_verified: int = 0,
+    attempt_cache: str = "",
+    skip_attempted: bool = False,
     parent_job_id: str = "",
 ) -> dict[str, Any]:
     job = {
@@ -88,6 +96,13 @@ def create_job(
         "post_login_hold": post_login_hold,
         "post_run_hold": post_run_hold,
         "carsi_portal_preauth": bool(carsi_portal_preauth),
+        "include_supplementary": bool(include_supplementary),
+        "supplementary_only": bool(supplementary_only),
+        "supplementary_fast": bool(supplementary_fast),
+        "retry_failed": bool(retry_failed),
+        "target_verified": int(target_verified or 0),
+        "attempt_cache": str(attempt_cache or ""),
+        "skip_attempted": bool(skip_attempted),
         "parent_job_id": parent_job_id,
         "created_at": now_iso(),
         "updated_at": now_iso(),
@@ -153,24 +168,29 @@ def cancel_job(job: dict[str, Any]) -> dict[str, Any]:
     return job
 
 
-def retry_records(job: dict[str, Any]) -> list[dict[str, str]]:
+def retry_records(job: dict[str, Any], *, transient_only: bool = False) -> list[dict[str, str]]:
     records = list(job.get("records") or [])
     manifest_path = Path(str(job.get("output_dir") or "")) / "complete" / "manifest.json"
     if not manifest_path.exists():
-        return records
+        return [] if transient_only else records
 
     manifest = _read_json(manifest_path)
     if not isinstance(manifest, list):
-        return records
+        return [] if transient_only else records
 
-    retry_dois = {
-        str(item.get("doi") or "").lower()
-        for item in manifest
-        if item.get("status") != "success" or not item.get("verified_match")
+    outcomes = {
+        str(item.get("doi") or "").lower(): item
+        for item in manifest if isinstance(item, dict)
     }
-    if not retry_dois:
-        return []
-    return [record for record in records if str(record.get("doi") or "").lower() in retry_dois]
+    pending = []
+    for record in records:
+        item = outcomes.get(str(record.get("doi") or "").lower(), {})
+        if item.get("status") == "success" and item.get("verified_match"):
+            continue
+        if transient_only and failure_category(item.get("reason", ""), item.get("state", "")) != "transient":
+            continue
+        pending.append(record)
+    return pending
 
 
 def broker_log_paths(publisher: str) -> list[Path]:

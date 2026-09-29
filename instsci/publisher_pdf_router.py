@@ -136,6 +136,7 @@ def build_pdf_candidates(
     *,
     source_url: str = "",
     discovered_urls: Sequence[str] = (),
+    include_supplementary: bool = False,
 ) -> list[str]:
     """Build ordered, de-duplicated official PDF candidates for a publisher profile."""
     candidates: list[str] = []
@@ -173,7 +174,7 @@ def build_pdf_candidates(
     for url in discovered_urls:
         if not _clean(url):
             continue
-        if is_supplementary_url(profile, url):
+        if is_supplementary_url(profile, url) and not include_supplementary:
             continue
         if not is_pdf_candidate_url(profile, url):
             continue

@@ -454,6 +454,7 @@ SPRINGER_PROFILE = PublisherProfile(
     sso_text_markers=(
         "institutional login",
         "log in through your institution",
+        "log in via an institution",
         "access through your institution",
         "openathens",
     ),
@@ -461,6 +462,19 @@ SPRINGER_PROFILE = PublisherProfile(
     doi_prefixes=("10.1007", "10.1038"),
     sample_dois=("10.1038/s41586-020-2649-2",),
     base_domains=("link.springer.com", "www.nature.com", "nature.com"),
+    supplementary_url_markers=(
+        "suppl_file",
+        "suppdata",
+        "supporting-information",
+        "supplementary",
+        # Springer/Nature ESM assets: free supplementary files must never be
+        # mistaken for the paywalled full text (#15)
+        "moesm",
+        "/mediaobjects/",
+        "/content/esm/",
+        "_esm",
+        "esm.pdf",
+    ),
     pdf_source_path_templates=(
         PdfSourcePathTemplate(
             domain="link.springer.com",
@@ -799,7 +813,7 @@ def infer_publisher_profile(doi: str) -> PublisherProfile | None:
     """Infer a likely publisher profile from stable DOI prefixes."""
     normalized = doi.strip().lower()
     for profile in PUBLISHER_PROFILES.values():
-        if any(normalized.startswith(prefix.lower()) for prefix in profile.doi_prefixes):
+        if any(normalized.startswith(prefix.lower() + "/") for prefix in profile.doi_prefixes):
             return profile
     return None
 

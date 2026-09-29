@@ -14,6 +14,7 @@ from instsci.publisher_profiles import (
     ACS_PROFILE,
     ELSEVIER_PROFILE,
     RSC_PROFILE,
+    SCIENCE_PROFILE,
     SPRINGER_PROFILE,
     WORLD_SCIENTIFIC_PROFILE,
     WILEY_PROFILE,
@@ -22,6 +23,7 @@ from instsci.publisher_profiles import (
     infer_publisher_profile,
     list_publisher_profiles,
 )
+from instsci.sources import elsevier_api
 
 
 class FakeResponse:
@@ -321,6 +323,31 @@ class ACSBatchTests(unittest.TestCase):
             carsi_cookie_dir="carsi",
         )
         downloader = PublisherBatchDownloader(cfg, profile=ELSEVIER_PROFILE)
+
+        self.assertTrue(downloader._looks_logged_out(FakePage()))
+
+    def test_acs_short_institution_access_prompt_is_auth_wall(self):
+        class FakeBody:
+            def inner_text(self, **_kwargs):
+                return "Recently Viewed close modal Access through institution Log In ACS Publications PDF"
+
+        class FakePage:
+            url = "https://pubs.acs.org/doi/10.1021/acs.est.5c16148"
+
+            def title(self):
+                return "Iron Plaque Formation in Mollisols"
+
+            def locator(self, _selector):
+                return FakeBody()
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=ACS_PROFILE)
 
         self.assertTrue(downloader._looks_logged_out(FakePage()))
 
@@ -714,6 +741,137 @@ class ACSBatchTests(unittest.TestCase):
         self.assertIn("示例大学", page.options["institutionAliases"])
         self.assertEqual(result.events[-1]["state"], "institution_selected")
         self.assertIn("Example University (OpenAthens)", result.events[-1]["detail"])
+
+    def test_acs_recent_institution_selection_confirms_with_enter(self):
+        class FakeKeyboard:
+            def __init__(self):
+                self.presses = []
+
+            def press(self, key):
+                self.presses.append(key)
+
+        class FakePage:
+            url = "https://pubs.acs.org/action/ssostart?redirectUri=%2Fdoi%2F10.1021%2Fexample#"
+
+            def __init__(self):
+                self.keyboard = FakeKeyboard()
+
+            def evaluate(self, script, options=None):
+                if "clickTargetFor" not in script:
+                    return None
+                return {
+                    "selector": "recent-institution",
+                    "text": "Tsinghua University (OpenAthens)",
+                    "score": 200,
+                }
+
+            def locator(self, _selector):
+                raise RuntimeError("no continue button")
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        page = FakePage()
+        downloader = PublisherBatchDownloader(
+            cfg,
+            profile=get_publisher_profile("acs"),
+            institution_query="Tsinghua University",
+        )
+        result = DownloadResult(doi="10.1021/example", status="failed")
+
+        self.assertTrue(downloader._select_recent_institution(page, result))
+        self.assertEqual(page.keyboard.presses, ["Enter"])
+        self.assertIn("institution_confirm_enter", [event["state"] for event in result.events])
+
+    def test_recent_institution_skips_empty_federation_picker(self):
+        class FakePage:
+            url = "https://pubs.acs.org/action/ssostart"
+
+            def __init__(self):
+                self.script = ""
+
+            def evaluate(self, script, _options=None):
+                self.script = script
+                return None
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        page = FakePage()
+        downloader = PublisherBatchDownloader(
+            cfg,
+            profile=get_publisher_profile("acs"),
+            institution_query="Tsinghua University",
+        )
+        result = DownloadResult(doi="10.1021/example", status="failed")
+
+        self.assertFalse(downloader._select_recent_institution(page, result))
+        self.assertIn("no recent institution", page.script)
+        self.assertIn("find institution via federation", page.script)
+
+    def test_acs_institution_search_submits_before_result_click(self):
+        class FakeInput:
+            first = None
+
+            def __init__(self):
+                self.first = self
+                self.filled = []
+                self.presses = []
+
+            def is_visible(self, **_kwargs):
+                return True
+
+            def fill(self, value):
+                self.filled.append(value)
+
+            def press(self, key, **kwargs):
+                self.presses.append((key, kwargs))
+
+        class FakePage:
+            url = "https://pubs.acs.org/action/ssostart?redirectUri=%2Fdoi%2F10.1021%2Fexample#"
+
+            def __init__(self):
+                self.input = FakeInput()
+
+            def locator(self, _selector):
+                return self.input
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        page = FakePage()
+        downloader = PublisherBatchDownloader(
+            cfg,
+            profile=get_publisher_profile("acs"),
+            institution_query="Tsinghua University",
+        )
+        downloader._is_human_login_page = lambda _page: False  # type: ignore[method-assign]
+        downloader._select_recent_institution = lambda _page, _result: False  # type: ignore[method-assign]
+        downloader._select_openathens_wayfinder = lambda _page, _result: False  # type: ignore[method-assign]
+        downloader._select_annual_reviews_openathens = lambda _page, _result: False  # type: ignore[method-assign]
+        downloader._select_ieee_institution = lambda _page, _result: False  # type: ignore[method-assign]
+        downloader._click_institution_search_result = (  # type: ignore[method-assign]
+            lambda _page, _result: (_ for _ in ()).throw(AssertionError("should submit ACS search first"))
+        )
+        downloader._click_optional_continue = lambda _page, _result: None  # type: ignore[method-assign]
+        result = DownloadResult(doi="10.1021/example", status="failed")
+
+        self.assertTrue(downloader._select_institution(page, result))
+        self.assertEqual(page.input.filled, ["Tsinghua University"])
+        self.assertEqual(page.input.presses, [("Enter", {"timeout": 3000})])
+        self.assertIn("institution_search_submitted", [event["state"] for event in result.events])
 
     def test_wiley_does_not_expose_hardcoded_tsinghua_wayfless(self):
         cfg = Config(
@@ -1253,10 +1411,14 @@ class ACSBatchTests(unittest.TestCase):
         downloader = PublisherBatchDownloader(cfg, profile=ELSEVIER_PROFILE, login_timeout_sec=60)
         result = DownloadResult(doi="10.1016/j.watres.test", status="failed")
 
-        with patch("instsci.publisher_batch.time.sleep") as sleep:
+        with (
+            patch("instsci.publisher_batch.show_desktop_alert", return_value=False),
+            patch("instsci.publisher_batch.time.sleep") as sleep,
+        ):
             downloader._wait_for_challenge(FakePage(), result)
 
-        self.assertGreaterEqual(sleep.call_count, 10)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertLessEqual(max(call.args[0] for call in sleep.call_args_list), 30)
         self.assertEqual(result.events[-1]["state"], "challenge_wait")
 
     def test_challenge_wait_ignores_article_text_with_verified_word(self):
@@ -1320,12 +1482,50 @@ class ACSBatchTests(unittest.TestCase):
             page.url = "https://www.worldscientific.com/doi/10.1142/example"
             page.body_text = "Article abstract brought to you by TSINGHUA UNIVERSITY CHINA"
 
-        with patch("instsci.publisher_batch.time.sleep", side_effect=resolve_after_first_wait):
+        with (
+            patch("instsci.publisher_batch.show_desktop_alert", return_value=False),
+            patch("instsci.publisher_batch.time.sleep", side_effect=resolve_after_first_wait),
+        ):
             self.assertTrue(downloader._wait_for_challenge(page, result))
 
         states = [event["state"] for event in result.events]
         self.assertIn("challenge_manual_wait", states)
         self.assertIn("challenge_resolved", states)
+
+    def test_challenge_wait_shows_desktop_alert_once(self):
+        class FakeBody:
+            def inner_text(self, **_kwargs):
+                return "www.science.org 正在进行安全验证 Cloudflare 请验证您是真人"
+
+        class FakePage:
+            url = "https://www.science.org/action/ssostart"
+
+            def title(self):
+                return "请稍候…"
+
+            def locator(self, _selector):
+                return FakeBody()
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=SCIENCE_PROFILE, login_timeout_sec=10)
+        result = DownloadResult(doi="10.1126/example", status="failed")
+
+        with (
+            patch("instsci.publisher_batch.show_desktop_alert", return_value=True) as alert,
+            patch("instsci.publisher_batch.time.sleep"),
+        ):
+            self.assertFalse(downloader._wait_for_challenge(FakePage(), result))
+
+        alert.assert_called_once()
+        states = [event["state"] for event in result.events]
+        self.assertEqual(states.count("desktop_alert"), 1)
+        self.assertIn("challenge_manual_wait", states)
 
     def test_complete_login_waits_for_cloudflare_manual_resolution(self):
         class FakeBody:
@@ -1580,7 +1780,39 @@ class ACSBatchTests(unittest.TestCase):
 
         self.assertTrue(downloader._click_sso_entry(page, result))
         self.assertIn("if (matched)", page.script)
+        self.assertIn("isNonSsoNavigation", page.script)
+        self.assertIn("raw.startsWith('#')", page.script)
         self.assertNotIn("href.includes('ssostart')) {", page.script)
+
+    def test_sso_entry_ignores_science_skip_anchor(self):
+        class FakePage:
+            url = "https://www.science.org/action/ssostart?redirectUri=%2Fdoi%2F10.1126%2Fscience.adz3996"
+
+            def evaluate(self, script, _markers):
+                self.script = script
+                return {
+                    "text": "skip to main content skip to main content",
+                    "href": (
+                        "https://www.science.org/action/ssostart?"
+                        "redirecturi=%2fdoi%2f10.1126%2fscience.adz3996#main-content-focus"
+                    ),
+                    "raw_href": "#main-content-focus",
+                }
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        page = FakePage()
+        downloader = PublisherBatchDownloader(cfg, profile=SCIENCE_PROFILE)
+        result = DownloadResult(doi="10.1126/science.adz3996", status="failed")
+
+        self.assertFalse(downloader._click_sso_entry(page, result))
+        self.assertEqual(result.events[-1]["state"], "sso_entry_ignored")
+        self.assertIn("isNonSsoNavigation", page.script)
 
     def test_aps_provider_credentials_link_is_sso_entry(self):
         class FakePage:
@@ -1980,6 +2212,31 @@ class ACSBatchTests(unittest.TestCase):
             [("goto", "https://ds.carsi.edu.cn/login/index.html")],
         )
 
+    def test_carsi_portal_resource_page_counts_as_authenticated(self):
+        class FakeBody:
+            def inner_text(self, **_kwargs):
+                return "\u6211\u7684\u8d44\u6e90"
+
+        class FakePage:
+            url = "https://ds.carsi.edu.cn/login/index.html"
+
+            def title(self):
+                return "CARSI-\u5e94\u7528\u8d44\u6e90"
+
+            def locator(self, _selector):
+                return FakeBody()
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=SCIENCE_PROFILE)
+
+        self.assertTrue(downloader._carsi_portal_authenticated(FakePage()))
+
     def test_fetch_one_rechecks_async_auth_wall_after_login(self):
         class FakePage:
             url = "https://journals.aps.org/prl/abstract/10.1103/PhysRevLett.128.161102"
@@ -2333,6 +2590,734 @@ class ACSBatchTests(unittest.TestCase):
         self.assertIn("https://example.org/download/primary.pdf", candidates)
         self.assertNotIn("https://example.org/article/suppl_file/demo.pdf", candidates)
         self.assertNotIn("https://example.org/ignore/html", candidates)
+
+    def test_supplementary_candidates_are_opt_in(self):
+        class FakePage:
+            url = "https://example.org/doi/10.0000/demo"
+
+            def evaluate(self, *_args):
+                return [
+                    "https://example.org/article/suppl_file/demo.pdf",
+                    "https://example.org/download/primary.pdf",
+                    "https://example.org/ignore/html",
+                ]
+
+        profile = PublisherProfile(
+            name="Example",
+            article_url_template="https://example.org/doi/{doi}",
+            pdf_url_templates=("https://example.org/pdf/{doi}",),
+            success_url_markers=("example.org/doi/",),
+            auth_url_markers=(),
+            auth_title_markers=(),
+            sso_text_markers=(),
+            pdf_url_markers=("/pdf/", "/download/"),
+            supplementary_url_markers=("suppl_file",),
+        )
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+
+        default_downloader = PublisherBatchDownloader(cfg, profile=profile)
+        opt_in_downloader = PublisherBatchDownloader(cfg, profile=profile, include_supplementary=True)
+
+        self.assertEqual(default_downloader._supplementary_candidates(FakePage(), "10.0000/demo"), [])
+        self.assertEqual(
+            opt_in_downloader._supplementary_candidates(FakePage(), "10.0000/demo"),
+            ["https://example.org/article/suppl_file/demo.pdf"],
+        )
+
+    def test_supplementary_candidates_accept_text_labeled_links(self):
+        class FakePage:
+            url = "https://example.org/doi/10.0000/demo"
+
+            def evaluate(self, *_args):
+                return [
+                    {"url": "https://example.org/download/files/demo-si.pdf", "supplementary": True},
+                    {"url": "https://example.org/download/primary.pdf", "supplementary": False},
+                ]
+
+        profile = PublisherProfile(
+            name="Example",
+            article_url_template="https://example.org/doi/{doi}",
+            pdf_url_templates=("https://example.org/pdf/{doi}",),
+            success_url_markers=("example.org/doi/",),
+            auth_url_markers=(),
+            auth_title_markers=(),
+            sso_text_markers=(),
+            pdf_url_markers=("/pdf/", "/download/"),
+            supplementary_url_markers=("suppl_file",),
+        )
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=profile, include_supplementary=True)
+
+        self.assertEqual(
+            downloader._supplementary_candidates(FakePage(), "10.0000/demo"),
+            ["https://example.org/download/files/demo-si.pdf"],
+        )
+
+    def test_science_fast_mode_adds_standard_sm_pdf_candidate(self):
+        class FakePage:
+            url = "https://www.science.org/doi/10.1126/sciadv.adp3964"
+
+            def evaluate(self, *_args):
+                return []
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(
+            cfg,
+            profile=SCIENCE_PROFILE,
+            include_supplementary=True,
+            supplementary_fast=True,
+        )
+
+        candidates = downloader._supplementary_candidates(FakePage(), "10.1126/sciadv.adp3964")
+
+        self.assertIn(
+            "https://www.science.org/doi/suppl/10.1126/sciadv.adp3964/suppl_file/sciadv.adp3964_sm.pdf",
+            candidates,
+        )
+
+    def test_science_fast_mode_adds_standard_sm_pdf_candidate_for_aaas_journals(self):
+        class FakePage:
+            url = "https://www.science.org/doi/10.1126/science.ady3136"
+
+            def evaluate(self, *_args):
+                return []
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(
+            cfg,
+            profile=SCIENCE_PROFILE,
+            include_supplementary=True,
+            supplementary_fast=True,
+        )
+
+        expected = {
+            "10.1126/science.ady3136": "https://www.science.org/doi/suppl/10.1126/science.ady3136/suppl_file/science.ady3136_sm.pdf",
+            "10.1126/scitranslmed.adq0001": "https://www.science.org/doi/suppl/10.1126/scitranslmed.adq0001/suppl_file/scitranslmed.adq0001_sm.pdf",
+            "10.1126/scisignal.adq0002": "https://www.science.org/doi/suppl/10.1126/scisignal.adq0002/suppl_file/scisignal.adq0002_sm.pdf",
+            "10.1126/sciimmunol.adq0003": "https://www.science.org/doi/suppl/10.1126/sciimmunol.adq0003/suppl_file/sciimmunol.adq0003_sm.pdf",
+            "10.1126/scirobotics.adq0004": "https://www.science.org/doi/suppl/10.1126/scirobotics.adq0004/suppl_file/scirobotics.adq0004_sm.pdf",
+        }
+
+        for doi, candidate in expected.items():
+            with self.subTest(doi=doi):
+                self.assertIn(candidate, downloader._supplementary_candidates(FakePage(), doi))
+
+    def test_science_fast_mode_adds_short_suffix_sm_pdf_candidate_for_aaas_journals(self):
+        class FakePage:
+            url = "https://www.science.org/doi/10.1126/sciadv.abd6034"
+
+            def evaluate(self, *_args):
+                return []
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(
+            cfg,
+            profile=SCIENCE_PROFILE,
+            include_supplementary=True,
+            supplementary_fast=True,
+        )
+
+        candidates = downloader._supplementary_candidates(FakePage(), "10.1126/sciadv.abd6034")
+
+        self.assertIn(
+            "https://www.science.org/doi/suppl/10.1126/sciadv.abd6034/suppl_file/abd6034_sm.pdf",
+            candidates,
+        )
+
+    def test_fast_supplementary_timeout_is_capped_below_pdf_timeout(self):
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        normal = PublisherBatchDownloader(
+            cfg,
+            profile=SCIENCE_PROFILE,
+            include_supplementary=True,
+            pdf_timeout_sec=180,
+        )
+        fast = PublisherBatchDownloader(
+            cfg,
+            profile=SCIENCE_PROFILE,
+            include_supplementary=True,
+            supplementary_fast=True,
+            pdf_timeout_sec=180,
+        )
+
+        self.assertEqual(normal._supplementary_timeout_ms(), 180_000)
+        self.assertEqual(fast._supplementary_timeout_ms(), 90_000)
+
+    def test_supplementary_materials_are_downloaded_to_separate_directory_when_enabled(self):
+        class FakePage:
+            url = "https://example.org/doi/10.0000/demo"
+
+            def evaluate(self, *_args):
+                return ["https://example.org/article/suppl_file/demo.pdf"]
+
+        profile = PublisherProfile(
+            name="Example",
+            article_url_template="https://example.org/doi/{doi}",
+            pdf_url_templates=("https://example.org/pdf/{doi}",),
+            success_url_markers=("example.org/doi/",),
+            auth_url_markers=(),
+            auth_title_markers=(),
+            sso_text_markers=(),
+            pdf_url_markers=("/pdf/", "/download/"),
+            supplementary_url_markers=("suppl_file",),
+        )
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=profile, include_supplementary=True)
+        downloader._fetch_supplementary_url_with_browser_state = (  # type: ignore[method-assign]
+            lambda url, page: (b"%PDF- supplementary", url, "application/pdf")
+        )
+        result = DownloadResult(doi="10.0000/demo", status="success")
+        record = PaperRecord(doi="10.0000/demo")
+
+        with TemporaryDirectory() as tmp:
+            paths = downloader._download_supplementary_materials(FakePage(), record, Path(tmp), result)
+
+            self.assertEqual(len(paths), 1)
+            self.assertTrue(Path(paths[0]).exists())
+            self.assertEqual(Path(paths[0]).read_bytes(), b"%PDF- supplementary")
+            self.assertEqual(result.supplementary_paths, paths)
+            self.assertEqual(result.supplementary_urls, ["https://example.org/article/suppl_file/demo.pdf"])
+
+    def test_supplementary_materials_skip_duplicate_final_downloads(self):
+        class FakePage:
+            url = "https://www.science.org/doi/10.1126/sciimmunol.abg5021"
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=SCIENCE_PROFILE, include_supplementary=True)
+        final_url = "https://www.science.org/action/downloadSupplement?doi=10.1126%2Fsciimmunol.abg5021&file=abg5021_sm.pdf"
+        downloader._fetch_supplementary_url_with_browser_state = (  # type: ignore[method-assign]
+            lambda url, page: (b"%PDF- duplicate science supplement", final_url, "application/pdf")
+        )
+        result = DownloadResult(doi="10.1126/sciimmunol.abg5021", status="success")
+        record = PaperRecord(doi="10.1126/sciimmunol.abg5021")
+        candidates = [
+            "https://www.science.org/doi/suppl/10.1126/sciimmunol.abg5021/suppl_file/sciimmunol.abg5021_sm.pdf",
+            "https://www.science.org/doi/suppl/10.1126/sciimmunol.abg5021/suppl_file/abg5021_sm.pdf",
+        ]
+
+        with TemporaryDirectory() as tmp:
+            paths = downloader._download_supplementary_materials(
+                FakePage(),
+                record,
+                Path(tmp),
+                result,
+                candidates=candidates,
+            )
+
+            self.assertEqual(len(paths), 1)
+            self.assertEqual(result.supplementary_urls, [final_url])
+
+    def test_supplementary_materials_fall_back_to_browser_click_pdf_response(self):
+        class FakeResponse:
+            status = 200
+            url = "https://www.science.org/action/downloadSupplement?doi=10.1126%2Fsciadv.adp3964&file=sciadv.adp3964_sm.pdf"
+            headers = {"content-type": "application/pdf;charset=UTF-8"}
+
+            def body(self):
+                return b"%PDF- supplementary via response"
+
+        class FakeDownload:
+            suggested_filename = "sciadv.adp3964_sm.pdf"
+
+            def save_as(self, _path):
+                raise RuntimeError("canceled")
+
+        class FakeDownloadContext:
+            value = FakeDownload()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        class FakeLocator:
+            def __init__(self, page):
+                self.page = page
+
+            def count(self):
+                return 1
+
+            def first(self):
+                return self
+
+            def click(self, **kwargs):
+                if kwargs.get("force"):
+                    raise AssertionError("supplementary click should preserve normal page interaction")
+                self.page.response_handler(FakeResponse())
+
+        class FakePage:
+            url = "https://www.science.org/doi/10.1126/sciadv.adp3964#supplementary-materials"
+
+            def __init__(self):
+                self.response_handler = lambda _response: None
+
+            def on(self, event, handler):
+                if event == "response":
+                    self.response_handler = handler
+
+            def off(self, event, handler):
+                if event == "response" and self.response_handler == handler:
+                    self.response_handler = lambda _response: None
+
+            def evaluate(self, *_args):
+                return True
+
+            def locator(self, _selector):
+                return FakeLocator(self)
+
+            def expect_download(self, **_kwargs):
+                return FakeDownloadContext()
+
+            def wait_for_timeout(self, _timeout):
+                return None
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=SCIENCE_PROFILE, include_supplementary=True)
+        downloader._fetch_supplementary_url_with_browser_state = lambda url, page: (None, url, "")  # type: ignore[method-assign]
+        result = DownloadResult(doi="10.1126/sciadv.adp3964", status="success")
+        record = PaperRecord(doi="10.1126/sciadv.adp3964")
+        candidate = "https://www.science.org/doi/suppl/10.1126/sciadv.adp3964/suppl_file/sciadv.adp3964_sm.pdf"
+
+        with TemporaryDirectory() as tmp:
+            paths = downloader._download_supplementary_materials(
+                FakePage(),
+                record,
+                Path(tmp),
+                result,
+                candidates=[candidate],
+            )
+
+            self.assertEqual(len(paths), 1)
+            self.assertTrue(Path(paths[0]).name.endswith(".pdf"))
+            self.assertEqual(Path(paths[0]).read_bytes(), b"%PDF- supplementary via response")
+            self.assertEqual(result.supplementary_paths, paths)
+            self.assertEqual(result.supplementary_urls, [FakeResponse.url])
+
+    def test_supplementary_only_fetch_one_skips_primary_pdf_capture(self):
+        class FakePage:
+            url = "https://www.science.org/doi/10.1126/sciadv.adp3964"
+
+            def close(self):
+                return None
+
+        class FakeContext:
+            def new_page(self):
+                return FakePage()
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(
+            cfg,
+            profile=SCIENCE_PROFILE,
+            include_supplementary=True,
+            supplementary_only=True,
+        )
+        candidate = "https://www.science.org/doi/suppl/10.1126/sciadv.adp3964/suppl_file/sciadv.adp3964_sm.pdf"
+        downloader._ensure_login = lambda _page, _result: True  # type: ignore[method-assign]
+        downloader._looks_logged_out = lambda _page: False  # type: ignore[method-assign]
+        downloader._title = lambda _page: "Science supplementary article"  # type: ignore[method-assign]
+        downloader._hold_after_login = lambda _page, _result: None  # type: ignore[method-assign]
+        downloader._hold_after_run = lambda _page, _result: None  # type: ignore[method-assign]
+        downloader._supplementary_candidates = lambda _page, _doi: [candidate]  # type: ignore[method-assign]
+        downloader._capture_pdf = lambda *_args: (_ for _ in ()).throw(AssertionError("primary PDF should be skipped"))  # type: ignore[method-assign]
+
+        def fake_download(_page, record, run_dir, result, *, candidates=None):
+            self.assertEqual(candidates, [candidate])
+            dst_dir = run_dir / "supplementary" / safe_name(record.doi)
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            path = dst_dir / "sciadv.adp3964_sm.pdf"
+            path.write_bytes(b"%PDF- supplementary only")
+            result.supplementary_paths = [str(path)]
+            result.supplementary_urls = [candidate]
+            return [str(path)]
+
+        downloader._download_supplementary_materials = fake_download  # type: ignore[method-assign]
+        record = PaperRecord(doi="10.1126/sciadv.adp3964")
+
+        with TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            result = downloader.fetch_one(FakeContext(), record, run_dir)
+
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.state, "supplementary_downloaded")
+            self.assertEqual(result.pdf_path, "")
+            self.assertEqual(len(result.supplementary_paths), 1)
+            payload = json.loads((run_dir / f"{safe_name(record.doi)}.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["full_text"], "")
+
+    def test_elsevier_supplementary_only_uses_api_before_browser(self):
+        class FakeContext:
+            def new_page(self):
+                raise AssertionError("Elsevier API supplementary route should not open a browser on success")
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+            elsevier_api_key="test-key",
+        )
+        downloader = PublisherBatchDownloader(
+            cfg,
+            profile=ELSEVIER_PROFILE,
+            include_supplementary=True,
+            supplementary_only=True,
+        )
+        result_object = elsevier_api.SupplementaryObject(
+            eid="1-s2.0-S0043135426007505-mmc1.xlsx",
+            filename="1-s2.0-S0043135426007505-mmc1.xlsx",
+            content_type="application/excel;charset=UTF-8",
+            size_bytes=64,
+            route="direct",
+            url="https://api.elsevier.com/content/object/eid/1-s2.0-S0043135426007505-mmc1.xlsx",
+            data=b"PK\x03\x04" + b"xlsx-body" * 8,
+        )
+
+        with patch("instsci.sources.elsevier_api.fetch_supplementary_objects", return_value=[result_object]):
+            with TemporaryDirectory() as tmp:
+                result = downloader.fetch_one(
+                    FakeContext(),
+                    PaperRecord(doi="10.1016/j.watres.2026.126069"),
+                    Path(tmp),
+                )
+
+                self.assertEqual(result.status, "success")
+                self.assertEqual(result.state, "supplementary_downloaded")
+                self.assertEqual(len(result.supplementary_paths), 1)
+                saved = Path(result.supplementary_paths[0])
+                self.assertEqual(saved.name, "1-s2.0-S0043135426007505-mmc1.xlsx")
+                self.assertTrue(saved.read_bytes().startswith(b"PK\x03\x04"))
+
+    def test_supplementary_materials_skip_page_anchor_candidates(self):
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=SCIENCE_PROFILE, include_supplementary=True)
+        record = PaperRecord(doi="10.1126/sciadv.adp3964")
+        result = DownloadResult(doi=record.doi, status="success")
+        anchor = "https://www.science.org/doi/10.1126/sciadv.adp3964#supplementary-materials"
+        supplement = "https://www.science.org/doi/suppl/10.1126/sciadv.adp3964/suppl_file/sciadv.adp3964_sm.pdf"
+        probed: list[tuple[str, str]] = []
+
+        def fake_fetch(url, page):
+            probed.append(("request", url))
+            if url == supplement:
+                return b"%PDF- science supplement", url, "application/pdf"
+            return None, url, ""
+
+        def fake_click(url, page):
+            probed.append(("click", url))
+            return None, url, ""
+
+        downloader._fetch_supplementary_url_with_browser_state = fake_fetch  # type: ignore[method-assign]
+        downloader._fetch_supplementary_url_via_browser_click = fake_click  # type: ignore[method-assign]
+
+        with TemporaryDirectory() as tmp:
+            paths = downloader._download_supplementary_materials(
+                object(),
+                record,
+                Path(tmp),
+                result,
+                candidates=[anchor, supplement],
+            )
+
+            self.assertEqual(len(paths), 1)
+            self.assertEqual(Path(paths[0]).read_bytes(), b"%PDF- science supplement")
+            self.assertEqual(probed, [("request", supplement)])
+            self.assertNotIn(
+                {"state": "supplementary_download_failed", "detail": anchor},
+                result.events,
+            )
+
+    def test_supplementary_browser_click_supports_playwright_first_property(self):
+        class FakeResponse:
+            status = 200
+            url = "https://www.science.org/action/downloadSupplement?doi=10.1126%2Fsciadv.adp3964&file=sciadv.adp3964_sm.pdf"
+            headers = {"content-type": "application/pdf;charset=UTF-8"}
+
+            def body(self):
+                return b"%PDF- property first selector"
+
+        class FakeDownload:
+            suggested_filename = "sciadv.adp3964_sm.pdf"
+
+            def save_as(self, _path):
+                raise RuntimeError("canceled")
+
+        class FakeDownloadContext:
+            value = FakeDownload()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        class FakeLocator:
+            def __init__(self, page):
+                self.page = page
+
+            def count(self):
+                return 1
+
+            @property
+            def first(self):
+                return self
+
+            def click(self, **kwargs):
+                if kwargs.get("force"):
+                    raise AssertionError("supplementary click should preserve normal page interaction")
+                self.page.response_handler(FakeResponse())
+
+        class FakePage:
+            def __init__(self):
+                self.response_handler = lambda _response: None
+
+            def on(self, event, handler):
+                if event == "response":
+                    self.response_handler = handler
+
+            def off(self, event, handler):
+                if event == "response" and self.response_handler == handler:
+                    self.response_handler = lambda _response: None
+
+            def evaluate(self, *_args):
+                return True
+
+            def locator(self, _selector):
+                return FakeLocator(self)
+
+            def expect_download(self, **_kwargs):
+                return FakeDownloadContext()
+
+            def wait_for_timeout(self, _timeout):
+                return None
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=SCIENCE_PROFILE, include_supplementary=True)
+        body, final_url, content_type = downloader._fetch_supplementary_url_via_browser_click(
+            "https://www.science.org/doi/suppl/10.1126/sciadv.adp3964/suppl_file/sciadv.adp3964_sm.pdf",
+            FakePage(),
+        )
+
+        self.assertEqual(body, b"%PDF- property first selector")
+        self.assertEqual(final_url, FakeResponse.url)
+        self.assertEqual(content_type, "application/pdf;charset=UTF-8")
+
+    def test_supplementary_download_uses_suggested_pdf_filename_for_extension(self):
+        class FakeDownload:
+            suggested_filename = "sciadv.adp3964_sm.pdf"
+            url = "https://www.science.org/action/downloadSupplement?doi=10.1126%2Fsciadv.adp3964&file=sciadv.adp3964_sm.pdf"
+
+            def save_as(self, path):
+                Path(path).write_bytes(b"%PDF- science supplement")
+
+        class FakeDownloadContext:
+            value = FakeDownload()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        class FakeLocator:
+            def count(self):
+                return 1
+
+            @property
+            def first(self):
+                return self
+
+            def click(self, **_kwargs):
+                return None
+
+        class FakePage:
+            def evaluate(self, *_args):
+                return True
+
+            def locator(self, _selector):
+                return FakeLocator()
+
+            def expect_download(self, **_kwargs):
+                return FakeDownloadContext()
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=SCIENCE_PROFILE, include_supplementary=True)
+        downloader._fetch_supplementary_url_with_browser_state = lambda url, page: (None, url, "")  # type: ignore[method-assign]
+        result = DownloadResult(doi="10.1126/sciadv.adp3964", status="success")
+        record = PaperRecord(doi="10.1126/sciadv.adp3964")
+
+        with TemporaryDirectory() as tmp:
+            paths = downloader._download_supplementary_materials(
+                FakePage(),
+                record,
+                Path(tmp),
+                result,
+                candidates=[
+                    "https://www.science.org/doi/suppl/10.1126/sciadv.adp3964/suppl_file/sciadv.adp3964_sm.pdf"
+                ],
+            )
+
+            self.assertEqual(len(paths), 1)
+            self.assertEqual(Path(paths[0]).suffix, ".pdf")
+            self.assertEqual(Path(paths[0]).read_bytes(), b"%PDF- science supplement")
+
+    def test_supplementary_browser_click_falls_back_to_filename_selector(self):
+        class FakeResponse:
+            status = 200
+            url = "https://www.science.org/action/downloadSupplement?doi=10.1126%2Fsciadv.adp3964&file=sciadv.adp3964_sm.pdf"
+            headers = {"content-type": "application/pdf;charset=UTF-8"}
+
+            def body(self):
+                return b"%PDF- filename selector"
+
+        class FakeDownload:
+            suggested_filename = "sciadv.adp3964_sm.pdf"
+
+            def save_as(self, _path):
+                raise RuntimeError("canceled")
+
+        class FakeDownloadContext:
+            value = FakeDownload()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        class FakeLocator:
+            def __init__(self, page, selector):
+                self.page = page
+                self.selector = selector
+
+            def count(self):
+                return 1 if "sciadv.adp3964_sm.pdf" in self.selector else 0
+
+            def first(self):
+                return self
+
+            def click(self, **_kwargs):
+                self.page.response_handler(FakeResponse())
+
+        class FakePage:
+            def __init__(self):
+                self.response_handler = lambda _response: None
+
+            def on(self, event, handler):
+                if event == "response":
+                    self.response_handler = handler
+
+            def off(self, event, handler):
+                if event == "response" and self.response_handler == handler:
+                    self.response_handler = lambda _response: None
+
+            def evaluate(self, *_args):
+                return False
+
+            def locator(self, selector):
+                return FakeLocator(self, selector)
+
+            def expect_download(self, **_kwargs):
+                return FakeDownloadContext()
+
+            def wait_for_timeout(self, _timeout):
+                return None
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=SCIENCE_PROFILE, include_supplementary=True)
+        body, final_url, content_type = downloader._fetch_supplementary_url_via_browser_click(
+            "https://www.science.org/doi/suppl/10.1126/sciadv.adp3964/suppl_file/sciadv.adp3964_sm.pdf",
+            FakePage(),
+        )
+
+        self.assertEqual(body, b"%PDF- filename selector")
+        self.assertEqual(final_url, FakeResponse.url)
+        self.assertEqual(content_type, "application/pdf;charset=UTF-8")
 
     def test_elsevier_pdf_candidates_are_limited_to_current_article(self):
         class FakePage:
@@ -2833,6 +3818,78 @@ class ACSBatchTests(unittest.TestCase):
         self.assertTrue(downloader._click_pdf_entry(page, result, doi=result.doi))
         self.assertTrue(page.clicked)
         self.assertIn("elsevier-view-pdf", result.events[-1]["detail"])
+
+    def test_acs_click_pdf_entry_uses_current_doi_mouse_click(self):
+        class FakeMouse:
+            def __init__(self):
+                self.clicked = []
+
+            def click(self, x, y):
+                self.clicked.append((x, y))
+
+        class FakePage:
+            def __init__(self):
+                self.mouse = FakeMouse()
+
+            def evaluate(self, _script, doi):
+                assert doi == "10.1021/acs.est.5c16148"
+                return {
+                    "selector": "acs-current-doi-pdf",
+                    "text": "PDF",
+                    "href": "https://pubs.acs.org/doi/pdf/10.1021/acs.est.5c16148",
+                    "x": 100,
+                    "y": 50,
+                    "score": 180,
+                }
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=ACS_PROFILE)
+        page = FakePage()
+        result = DownloadResult(doi="10.1021/acs.est.5c16148", status="failed")
+
+        self.assertTrue(downloader._click_pdf_entry(page, result, doi=result.doi))
+        self.assertEqual(page.mouse.clicked, [(100.0, 50.0)])
+        self.assertIn("acs-current-doi-pdf", result.events[-1]["detail"])
+
+    def test_acs_capture_pdf_skips_direct_fallback_after_article_click(self):
+        class FakePage:
+            url = "https://pubs.acs.org/doi/10.1021/acs.est.5c16148"
+
+            def on(self, *_args):
+                return None
+
+            def remove_listener(self, *_args):
+                return None
+
+        cfg = Config(
+            output_dir="out",
+            cache_dir="cache",
+            cookie_path="cookies.json",
+            chrome_profile_dir="profile",
+            carsi_cookie_dir="carsi",
+        )
+        downloader = PublisherBatchDownloader(cfg, profile=ACS_PROFILE)
+        result = DownloadResult(doi="10.1021/acs.est.5c16148", status="failed")
+        page = FakePage()
+        downloader._return_to_record_article_if_needed = lambda *_args: True  # type: ignore[method-assign]
+        downloader._capture_pdf_with_browser_cookies = lambda *_args: (None, "")  # type: ignore[method-assign]
+        downloader._click_pdf_entry = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+        downloader._wait_for_challenge = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+        downloader._fetch_page_state_pdf = lambda *_args, **_kwargs: (None, "")  # type: ignore[method-assign]
+        downloader._pdf_candidates = lambda *_args: self.fail("ACS direct PDF fallback should be skipped")  # type: ignore[method-assign]
+
+        with patch("instsci.publisher_batch.time.sleep"):
+            pdf_bytes, pdf_url = downloader._capture_pdf(page, result.doi, result)
+
+        self.assertIsNone(pdf_bytes)
+        self.assertEqual(pdf_url, "")
+        self.assertIn("acs_pdf_click_no_capture", [event["state"] for event in result.events])
 
     def test_fetch_pdf_url_uses_browser_state_headers(self):
         signed_url = (
@@ -3563,6 +4620,51 @@ class ACSBatchTests(unittest.TestCase):
             self.assertEqual(manifest[0]["status"], "unverified")
             self.assertFalse(manifest[0]["verified_match"])
             self.assertTrue(Path(manifest[0]["pdf_path"]).exists())
+
+    def test_complete_manifest_accepts_supplementary_only_success(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            src_dir = base / "primary" / "supplementary" / "10.1126_sciadv.adp3964"
+            src_dir.mkdir(parents=True)
+            supplement = src_dir / "sciadv.adp3964_sm.pdf"
+            supplement.write_bytes(b"%PDF- supplementary")
+
+            cfg = Config(
+                output_dir=str(base / "out"),
+                cache_dir=str(base / "cache"),
+                cookie_path=str(base / "cookies.json"),
+                chrome_profile_dir=str(base / "profile"),
+                carsi_cookie_dir=str(base / "carsi"),
+            )
+            downloader = PublisherBatchDownloader(
+                cfg,
+                profile=SCIENCE_PROFILE,
+                include_supplementary=True,
+                supplementary_only=True,
+            )
+            records = [PaperRecord(doi="10.1126/sciadv.adp3964", title="")]
+            results = [
+                DownloadResult(
+                    doi="10.1126/sciadv.adp3964",
+                    status="success",
+                    state="supplementary_downloaded",
+                    supplementary_paths=[str(supplement)],
+                    supplementary_urls=[
+                        "https://www.science.org/doi/suppl/10.1126/sciadv.adp3964/suppl_file/sciadv.adp3964_sm.pdf"
+                    ],
+                )
+            ]
+
+            summary = downloader._write_complete_artifacts(records, results, base)
+
+            self.assertEqual(summary["success"], 1)
+            self.assertEqual(summary["missing"], 0)
+            self.assertEqual(summary["supplementary_count"], 1)
+            manifest = json.loads((base / "complete" / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest[0]["status"], "success")
+            self.assertEqual(manifest[0]["pdf_path"], "")
+            self.assertEqual(manifest[0]["supplementary_count"], 1)
+            self.assertTrue(Path(manifest[0]["supplementary_paths"][0]).exists())
 
     def test_run_records_stops_after_target_verified_count(self):
         class FakeContext:

@@ -1,6 +1,7 @@
 """Core paper fetching logic."""
 
 from contextvars import ContextVar
+from dataclasses import replace
 import hashlib
 import json
 import logging
@@ -21,7 +22,7 @@ from .models import FetchResult, NextAction, Paper
 from .pdf_bytes import describe_non_pdf_bytes, is_plausible_pdf_bytes
 from .publisher_pdf_router import build_pdf_candidates, discover_pdf_candidates_from_html
 from .publisher_profiles import infer_publisher_profile, infer_publisher_profile_from_url
-from .sources import arxiv, unpaywall
+from .sources import arxiv, openaire, unpaywall
 
 logger = logging.getLogger(__name__)
 
@@ -367,16 +368,34 @@ class PaperFetcher:
             year=oa.year,
         )
 
-        if not oa.is_oa:
-            logger.info("No OA version found for %s.", doi)
+        if oa.is_oa:
+            paper = self._fetch_oa_location(doi, oa, paper)
+        if len(paper.full_text or "") >= MIN_FULLTEXT_LEN:
             return paper
+
+        for candidate in openaire.find_oa_locations(doi):
+            if (candidate.pdf_url or candidate.html_url) in {oa.pdf_url, oa.html_url}:
+                continue
+            trial = self._fetch_oa_location(
+                doi, candidate, replace(paper, title=paper.title or candidate.title),
+                verify_identity=True,
+            )
+            _record_paper_attempt("openaire", trial)
+            if len(trial.full_text or "") >= MIN_FULLTEXT_LEN:
+                return trial
+            if len(trial.full_text or "") > len(paper.full_text or "") or (trial.pdf_path and not paper.pdf_path):
+                paper = trial
+        return paper
+
+    def _fetch_oa_location(self, doi: str, oa: unpaywall.OAResult, paper: Paper, *, verify_identity: bool = False) -> Paper:
+        """Reuse the OA PDF/HTML pipeline for each metadata candidate."""
 
         # Check if it's an arXiv paper
         arxiv_id = None
         if oa.source == "arxiv" or "arxiv" in (oa.pdf_url or "").lower():
             arxiv_id = arxiv.extract_arxiv_id(oa.pdf_url or oa.html_url or "")
 
-        if arxiv_id:
+        if arxiv_id and not verify_identity:
             return self._fetch_arxiv(arxiv_id, paper)
 
         # Try direct OA PDF download FIRST (always prefer PDF over HTML)
@@ -385,18 +404,9 @@ class PaperFetcher:
             paper.source = "open_access"
             self._rate_limit()
             try:
-                resp = request_with_retry("GET", oa.pdf_url, timeout=60, stream=True)
+                resp = request_with_retry("GET", oa.pdf_url, timeout=60)
                 resp.raise_for_status()
-                ct = resp.headers.get("content-type", "").lower()
-                if "pdf" in ct:
-                    pdf_bytes = resp.content
-                    paper.full_text = pdf_extractor.extract_from_bytes(pdf_bytes)
-                    paper.figures = pdf_extractor.extract_figures_from_text(
-                        paper.full_text
-                    ) if hasattr(pdf_extractor, 'extract_figures_from_text') else []
-                    # Save PDF
-                    pdf_path = self._save_pdf(doi, pdf_bytes)
-                    paper.pdf_path = str(pdf_path) if pdf_path else ""
+                if self._apply_oa_pdf(resp.content, paper, verify_identity=verify_identity):
                     if len(paper.full_text or "") >= MIN_FULLTEXT_LEN:
                         return paper
                     else:
@@ -405,7 +415,7 @@ class PaperFetcher:
                             len(paper.full_text or ""),
                         )
                 else:
-                    logger.warning("OA PDF URL returned non-PDF content-type: %s", ct)
+                    logger.warning("OA PDF candidate failed byte or article validation.")
             except requests.RequestException as e:
                 logger.warning("Failed to download OA PDF: %s", e)
 
@@ -417,7 +427,12 @@ class PaperFetcher:
             try:
                 resp = request_with_retry("GET", oa.html_url, timeout=30)
                 resp.raise_for_status()
+                if is_plausible_pdf_bytes(resp.content):
+                    self._apply_oa_pdf(resp.content, paper, verify_identity=verify_identity)
+                    return paper
                 extracted = html_extractor.extract(resp.text, oa.html_url)
+                if verify_identity and not self._oa_text_matches(extracted.get("full_text", ""), paper):
+                    extracted = {}
                 self._apply_extracted(paper, extracted)
 
                 # If HTML extraction got enough text, return
@@ -436,11 +451,7 @@ class PaperFetcher:
                     try:
                         pdf_resp = request_with_retry("GET", pdf_url, timeout=60)
                         pdf_resp.raise_for_status()
-                        if "pdf" in pdf_resp.headers.get("content-type", "").lower():
-                            pdf_bytes = pdf_resp.content
-                            paper.full_text = pdf_extractor.extract_from_bytes(pdf_bytes)
-                            pdf_path = self._save_pdf(doi, pdf_bytes)
-                            paper.pdf_path = str(pdf_path) if pdf_path else ""
+                        if self._apply_oa_pdf(pdf_resp.content, paper, verify_identity=verify_identity):
                             if len(paper.full_text or "") >= MIN_FULLTEXT_LEN:
                                 return paper
                     except requests.RequestException as e:
@@ -450,6 +461,48 @@ class PaperFetcher:
                 logger.warning("Failed to fetch OA HTML: %s", e)
 
         return paper
+
+    @staticmethod
+    def _oa_text_matches(text: str, paper: Paper) -> bool:
+        from .publisher_batch import NON_ARTICLE_PDF_MARKERS
+
+        # ponytail: inspect the first 5,000 characters/30 lines; add layout-aware
+        # extraction if valid repository copies regularly lack header identity.
+        head = re.split(
+            r"(?im)^\s*(?:references|bibliography|literature cited)\s*[:\d.]*\s*$",
+            (text or "")[:5000], maxsplit=1,
+        )[0]
+        if any(marker in re.sub(r"\s+", " ", head.lower()) for marker in NON_ARTICLE_PDF_MARKERS):
+            return False
+        first_doi = re.search(r"10\.\d{4,9}/[^\s<>\"{}]+", head, re.I)
+        if first_doi and first_doi.group().rstrip(".,;)").lower() == paper.doi.lower():
+            return True
+        # Match the complete title on its own (possibly wrapped) header lines.
+        title_words = re.findall(r"\w+", paper.title.casefold())
+        if len(title_words) < 3:
+            return False
+        lines = head.splitlines()[:30]
+        for start in range(len(lines)):
+            words = []
+            for line in lines[start:start + 4]:
+                words.extend(re.findall(r"\w+", line.casefold()))
+                if words == title_words:
+                    return True
+                if len(words) >= len(title_words):
+                    break
+        return False
+
+    def _apply_oa_pdf(self, data: bytes, paper: Paper, *, verify_identity: bool) -> bool:
+        if not is_plausible_pdf_bytes(data):
+            return False
+        text = pdf_extractor.extract_from_bytes(data)
+        if verify_identity and not self._oa_text_matches(text, paper):
+            return False
+        paper.full_text = text
+        pdf_path = self._save_pdf(paper.doi, data)
+        paper.pdf_path = str(pdf_path) if pdf_path else ""
+        paper.figures = pdf_extractor.extract_figures_from_text(text) if hasattr(pdf_extractor, "extract_figures_from_text") else []
+        return True
 
     def _fetch_arxiv(self, arxiv_id: str, paper: Paper) -> Paper:
         """Fetch paper from arXiv."""

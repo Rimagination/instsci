@@ -1,0 +1,354 @@
+{
+  "generated": "2026-06-23",
+  "source_of_truth": "InstSci built-in visible CloakBrowser workflow",
+  "mode": "public/OA smoke test, no configured subscription institution",
+  "include_supplementary_default": false,
+  "opt_in_flags": [
+    "--include-supplementary",
+    "include_supplementary=True"
+  ],
+  "optimized_flags": [
+    "--supplementary-only",
+    "--supplementary-fast"
+  ],
+  "science_batch_2026_06_28": {
+    "run_summary": "runs/science_supplementary_direct_batch5_20260628_224455/summary.json",
+    "publisher": "science",
+    "records": 5,
+    "downloaded": 5,
+    "validated": "PDF header, EOF marker, and page counts checked",
+    "lesson": "Skip primary PDF capture for requested Science supplementary-only runs, add the predictable Science Advances _sm.pdf candidate, and cap supplementary click waits separately from primary PDF waits."
+  },
+  "aaas_partial_smoke_2026_07_01": {
+    "run_dir": "runs/aaas_supplementary_smoke_20260701_001612",
+    "scope": "Science/AAAS sub-journal partial smoke",
+    "lesson": "Science Advances is not a complete proxy for all Science/AAAS journals. Generate both long DOI-suffix and short article-id _sm.pdf candidates, require visible CloakBrowser evidence, and skip duplicate final downloads.",
+    "results": [
+      {
+        "journal": "Science",
+        "doi": "10.1126/science.abe5017",
+        "result": "inconclusive",
+        "downloaded": 0,
+        "evidence": "supplementary_not_captured after standard and short _sm.pdf candidates",
+        "next_action": "Retest with a known main-journal article that visibly has supplementary materials."
+      },
+      {
+        "journal": "Science Advances",
+        "doi": "10.1126/sciadv.abd6034",
+        "result": "browser verified",
+        "downloaded": 2,
+        "evidence": "PDF 1656215 bytes / 82 pages; XLSX 57149 bytes zip-valid",
+        "next_action": "Keep as a non-adp3964 regression sample."
+      },
+      {
+        "journal": "Science Translational Medicine",
+        "doi": "10.1126/scitranslmed.adv0702",
+        "result": "auth_required",
+        "downloaded": 0,
+        "evidence": "AAAS/SeamlessAccess login was not completed before timeout",
+        "next_action": "Retry after user completes institution login in visible CloakBrowser."
+      },
+      {
+        "journal": "Science Signaling",
+        "doi": "10.1126/scisignal.adr3411",
+        "result": "auth_required",
+        "downloaded": 0,
+        "evidence": "AAAS/SeamlessAccess login was not completed before timeout",
+        "next_action": "Retry after user completes institution login in visible CloakBrowser."
+      },
+      {
+        "journal": "Science Immunology",
+        "doi": "10.1126/sciimmunol.abg5021",
+        "result": "browser verified",
+        "downloaded": 4,
+        "download_caveat": "Duplicate PDF was saved before final-url/content-hash dedupe fix.",
+        "evidence": "PDF 2868636 bytes / 34 pages; two PYZ files zip-valid; duplicate PDF observed",
+        "next_action": "Keep as multi-file regression and rerun after dedupe fix for clean counts."
+      },
+      {
+        "journal": "Science Robotics",
+        "doi": "10.1126/scirobotics.adi9754",
+        "result": "not_reached",
+        "downloaded": 0,
+        "evidence": "Run stopped after Immunology duplicate-download issue was found",
+        "next_action": "Retry after user completes AAAS login."
+      }
+    ]
+  },
+  "aaas_broker_restart_2026_07_01": {
+    "run_dir": "runs/aaas_supplementary_restart_20260701_112424",
+    "scope": "Science/AAAS sub-journal broker-backed supplementary restart",
+    "command_shape": "python -m instsci.cli publisher-batch <dois.txt> -p science --institution \"Institution Name\" --supplementary-only --supplementary-fast --broker --broker-ttl 259200 --detach --output <run>",
+    "records": 5,
+    "success": 5,
+    "supplementary_count": 11,
+    "broker": true,
+    "carsi_portal_preauth": false,
+    "lesson": "For Science/AAAS supplementary batches, start from Science article pages in the long-lived science broker. Do not use --carsi-portal-preauth unless explicitly testing CARSI portal login. After user SSO, verify visible article-page access markers, then let action/downloadSupplement downloads run in the same broker context.",
+    "avoid": [
+      "manual navigation to ds.carsi.edu.cn resource pages for normal AAAS article downloads",
+      "hand-written action/ssostart URLs",
+      "malformed DOI URLs entered through the address bar",
+      "same-page skip anchors such as #main-content-focus"
+    ],
+    "results": [
+      {
+        "journal": "Science",
+        "doi": "10.1126/science.adz3996",
+        "result": "browser verified",
+        "downloaded": 1,
+        "evidence": "runs/aaas_supplementary_restart_20260701_112424/complete/manifest.csv",
+        "workflow_note": "First record triggered user institution login, then returned to the article page before downloading."
+      },
+      {
+        "journal": "Science Translational Medicine",
+        "doi": "10.1126/scitranslmed.adv0702",
+        "result": "browser verified",
+        "downloaded": 3,
+        "evidence": "runs/aaas_supplementary_restart_20260701_112424/complete/supplementary/10.1126_scitranslmed.adv0702/",
+        "workflow_note": "Reused the same live broker login state after the first article."
+      },
+      {
+        "journal": "Science Signaling",
+        "doi": "10.1126/scisignal.adr3411",
+        "result": "browser verified",
+        "downloaded": 2,
+        "evidence": "runs/aaas_supplementary_restart_20260701_112424/complete/supplementary/10.1126_scisignal.adr3411/",
+        "workflow_note": "Reused the article-page supplementary route."
+      },
+      {
+        "journal": "Science Immunology",
+        "doi": "10.1126/sciimmunol.abg5021",
+        "result": "browser verified",
+        "downloaded": 3,
+        "evidence": "runs/aaas_supplementary_restart_20260701_112424/complete/supplementary/10.1126_sciimmunol.abg5021/",
+        "workflow_note": "Multi-file attachments include PDF and zip-like downloaded assets."
+      },
+      {
+        "journal": "Science Robotics",
+        "doi": "10.1126/scirobotics.adi9754",
+        "result": "browser verified",
+        "downloaded": 2,
+        "evidence": "runs/aaas_supplementary_restart_20260701_112424/complete/supplementary/10.1126_scirobotics.adi9754/",
+        "workflow_note": "Confirms this AAAS sub-journal works after broker login is established."
+      }
+    ]
+  },
+  "summary": {
+    "publishers_tested": 21,
+    "clean_download_success_publishers": [
+      "ams",
+      "copernicus",
+      "science",
+      "springer"
+    ],
+    "caveated_download_publishers": [
+      "plos"
+    ],
+    "priority_repairs": [
+      "rsc direct suppdata PDF candidate was visible but not saved",
+      "plos marker set is too broad and can capture article figure/image assets",
+      "annual-reviews/frontiers/pnas candidate links need follow-through to real file assets",
+      "mdpi supplementary discovery may require scroll/lazy-load handling"
+    ]
+  },
+  "runs": {
+    "first_long_run": "runs/supplementary_smoke_20260623_230336",
+    "independent_worker_summary": "runs/supplementary_smoke3_20260623_231800/summary.json",
+    "independent_worker_csv": "runs/supplementary_smoke3_20260623_231800/summary.csv"
+  },
+  "publishers": [
+    {
+      "publisher": "acm",
+      "doi": "10.1145/3448016.3452834",
+      "result": "blocked",
+      "supplementary_candidates": 0,
+      "downloaded": 0,
+      "evidence": "challenge_or_viewer_timeout",
+      "next_action": "Retest with a longer visible broker run and institution state if required."
+    },
+    {
+      "publisher": "acs",
+      "doi": "10.1021/acs.est.6c00693",
+      "result": "blocked",
+      "supplementary_candidates": 0,
+      "downloaded": 0,
+      "evidence": "Page.goto timeout 20000ms",
+      "next_action": "Retest with publisher broker and user-selected institution if the article is closed-access."
+    },
+    {
+      "publisher": "aip",
+      "doi": "10.1063/5.0237567",
+      "result": "blocked",
+      "supplementary_candidates": 0,
+      "downloaded": 0,
+      "evidence": "challenge_or_viewer_timeout",
+      "next_action": "Retest in visible CloakBrowser; do not mark unsupported from this smoke."
+    },
+    {
+      "publisher": "ams",
+      "doi": "10.1175/aies-d-23-0093.1",
+      "result": "browser verified",
+      "supplementary_candidates": 3,
+      "downloaded": 1,
+      "evidence": "runs/supplementary_smoke_20260623_230336/ams/supplementary/10.1175_aies-d-23-0093.1/10.1175_aies-d-23-0093.1_supplementary_03.pdf",
+      "next_action": "Make candidate handling deterministic; the shorter second run found candidates but saved none."
+    },
+    {
+      "publisher": "annual-reviews",
+      "doi": "10.1146/annurev-phyto-011325-012824",
+      "result": "blocked",
+      "supplementary_candidates": 2,
+      "downloaded": 0,
+      "evidence": "Candidates found, no file captured.",
+      "next_action": "Follow landing/action links to real attachment URLs."
+    },
+    {
+      "publisher": "aps",
+      "doi": "10.1103/PhysRevLett.128.161102",
+      "result": "auth_required",
+      "supplementary_candidates": 0,
+      "downloaded": 0,
+      "evidence": "Article page showed login/access controls before supplementary links were visible.",
+      "next_action": "Requires user subscription institution before closed-access retry."
+    },
+    {
+      "publisher": "copernicus",
+      "doi": "10.5194/acp-24-1-2024",
+      "result": "browser verified",
+      "supplementary_candidates": 2,
+      "downloaded": 1,
+      "evidence": "runs/supplementary_smoke3_20260623_231800/copernicus/supplementary/10.5194_acp-24-1-2024/10.5194_acp-24-1-2024_supplementary_01.pdf",
+      "next_action": "Keep as a regression sample."
+    },
+    {
+      "publisher": "elsevier",
+      "doi": "10.1016/j.watres.2024.121507",
+      "result": "blocked",
+      "supplementary_candidates": 0,
+      "downloaded": 0,
+      "evidence": "challenge_or_viewer_timeout",
+      "next_action": "Needs entitlement/API or visible broker repair; no supplement verdict from this smoke."
+    },
+    {
+      "publisher": "frontiers",
+      "doi": "10.3389/fmicb.2026.1831710",
+      "result": "blocked",
+      "supplementary_candidates": 4,
+      "downloaded": 0,
+      "evidence": "Candidates found, no file captured.",
+      "next_action": "Follow candidate links and inspect content type before saving."
+    },
+    {
+      "publisher": "ieee",
+      "doi": "10.1109/jstqe.2026.3687110",
+      "result": "browser verified",
+      "supplementary_candidates": 0,
+      "downloaded": 0,
+      "evidence": "Sample page produced no supplementary candidate.",
+      "next_action": "Use a known IEEE article with supplementary files before judging support."
+    },
+    {
+      "publisher": "iop",
+      "doi": "10.1088/1361-648x/ae72dd",
+      "result": "browser verified",
+      "supplementary_candidates": 0,
+      "downloaded": 0,
+      "evidence": "Sample page produced no supplementary candidate.",
+      "next_action": "Use a known IOP article with supplementary files before judging support."
+    },
+    {
+      "publisher": "mdpi",
+      "doi": "10.3390/foods10081757",
+      "result": "browser verified",
+      "supplementary_candidates": 0,
+      "downloaded": 0,
+      "evidence": "Short run found no candidates; first run once saw 4 candidates but saved none.",
+      "next_action": "Investigate lazy loading/scrolling and profile markers."
+    },
+    {
+      "publisher": "oxfordacademic",
+      "doi": "10.1093/nar/gkaa892",
+      "result": "blocked",
+      "supplementary_candidates": 0,
+      "downloaded": 0,
+      "evidence": "challenge_or_viewer_timeout",
+      "next_action": "Retest with longer visible run."
+    },
+    {
+      "publisher": "plos",
+      "doi": "10.1371/journal.pone.0000001",
+      "result": "blocked",
+      "supplementary_candidates": 0,
+      "downloaded": 12,
+      "download_caveat": "First long run saved PNG/TIF image assets; current marker set may capture ordinary figures.",
+      "evidence": "Short run timed out; first long run saved PNG/TIF image assets.",
+      "next_action": "Narrow PLOS supplementary markers so figure/image does not capture ordinary figures."
+    },
+    {
+      "publisher": "pnas",
+      "doi": "10.1073/pnas.2309123120",
+      "result": "blocked",
+      "supplementary_candidates": 3,
+      "downloaded": 0,
+      "evidence": "Candidates found, no file captured.",
+      "next_action": "Follow landing/action links to real files."
+    },
+    {
+      "publisher": "royalsocietypublishing",
+      "doi": "10.1098/rsos.150470",
+      "result": "blocked",
+      "supplementary_candidates": 0,
+      "downloaded": 0,
+      "evidence": "Page.goto timeout 20000ms",
+      "next_action": "Retest with longer visible run."
+    },
+    {
+      "publisher": "rsc",
+      "doi": "10.1039/d5cp03829d",
+      "result": "blocked",
+      "supplementary_candidates": 1,
+      "downloaded": 0,
+      "evidence": "Visible page showed Supplementary files; candidate https://www.rsc.org/suppdata/d5/cp/d5cp03829d/d5cp03829d1.pdf.",
+      "next_action": "Priority bugfix: direct RSC suppdata PDF should save."
+    },
+    {
+      "publisher": "science",
+      "doi": "10.1126/sciadv.adp3964",
+      "result": "browser verified",
+      "supplementary_candidates": 2,
+      "downloaded": 1,
+      "evidence": "runs/science_supplementary_formal_retry4_20260624_002930/primary/supplementary/10.1126_sciadv.adp3964/10.1126_sciadv.adp3964_supplementary_01.pdf",
+      "notes": "Direct /doi/suppl/...pdf may 403/Cloudflare. In visible CloakBrowser, click the article-page DOWNLOAD link, capture the action/downloadSupplement browser download, and use download.suggested_filename for the .pdf extension.",
+      "next_action": "Keep as a regression sample."
+    },
+    {
+      "publisher": "springer",
+      "doi": "10.1038/s41586-020-2649-2",
+      "result": "browser verified",
+      "supplementary_candidates": 2,
+      "downloaded": 1,
+      "evidence": "runs/supplementary_smoke3_20260623_231800/springer/supplementary/10.1038_s41586-020-2649-2/10.1038_s41586-020-2649-2_supplementary_01.pdf",
+      "visual_evidence": "runs/supplementary_smoke3_20260623_231800/springer/article_page.png showed Supplementary information.",
+      "next_action": "Keep as a regression sample."
+    },
+    {
+      "publisher": "wiley",
+      "doi": "10.1002/adfm.202525261",
+      "result": "blocked",
+      "supplementary_candidates": 0,
+      "downloaded": 0,
+      "evidence": "challenge_or_viewer_timeout",
+      "next_action": "Retest in visible broker; likely needs longer challenge handling."
+    },
+    {
+      "publisher": "world-scientific",
+      "doi": "10.1142/s0218194026500348",
+      "result": "blocked",
+      "supplementary_candidates": 0,
+      "downloaded": 0,
+      "evidence": "challenge_or_viewer_timeout",
+      "next_action": "Retest in visible broker."
+    }
+  ]
+}

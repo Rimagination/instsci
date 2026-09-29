@@ -2,6 +2,13 @@
 
 These rules define the project-level behavior expected from AI agents working in this repository.
 
+## Rule Scope
+
+- `AGENTS.md` contains reusable InstSci project rules, not a transcript of one user's session.
+- Keep rules institution-neutral and parameterized. Do not encode a personal institution, login state, run directory, cookie, token, credential, or one-off troubleshooting step as a general rule.
+- Store dated smoke-test evidence, per-publisher sample results, and detailed run artifacts in `instsci/data/*matrix*`, `runs/`, or task reports. In this file, keep only stable workflow lessons and references to those artifacts.
+- Publisher-specific rules are acceptable here only when they describe a reusable strategy for all users of that publisher, such as route order, evidence standard, or known false-positive class.
+
 ## Agent Workflow
 
 Use this workflow whenever a user asks to download PDFs, test publisher access, build a publisher capability matrix, diagnose closed-access retrieval, or make a final statement about whether a publisher can provide a PDF.
@@ -55,8 +62,19 @@ For publisher PDF work, report each publisher or DOI with:
 - `publisher-doctor`, `requests`, `curl`, and other direct HTTP probes are HTTP preflight only. They may verify DOI resolution, route templates, and candidate URL construction, but MUST NOT be presented as the final publisher PDF capability verdict.
 - If SSO, 2FA, or CAPTCHA appears, the user completes it manually in the built-in browser. Agents may wait, resume, and reuse `browser_profile_dir`, `carsi_cookie_dir/<publisher>.json`, and `attempt_cache`; agents must not bypass publisher or institution verification.
 - Browser-backed SSO runs must keep the built-in CloakBrowser visible and foregroundable. Do not wrap these runs with launchers that hide the browser window from the user.
+- Do not run Science/AAAS, Cloudflare, or WAF-gated publisher login tests in ad hoc temporary Playwright contexts or one-shot scripts that are closed after login. Use the long-lived publisher session broker, keep the visible CloakBrowser alive, and submit follow-up PDF or supplementary jobs into that broker. Browser profiles, exported cookies, and attempt caches are supporting artifacts; they are not a replacement for the live broker context after CAPTCHA, SSO, or CARSI.
 - Browser-backed UI actions require visual checkpoints. After clicking publisher controls such as `PDF`, `Institutional Access`, `Institutional Sign In`, OpenAthens, or a cookie/verification prompt, agents MUST inspect a screenshot of the visible CloakBrowser window before concluding the click worked or failed. DOM events, URL strings, and logs are supporting evidence, not substitutes for visual confirmation.
 - When reporting results, label HTTP-only findings as `HTTP preflight` and browser-backed findings as `browser verified`.
+
+## Supplementary Materials Rule
+
+- Supplementary material, appendix, supporting information, data file, and figure-asset downloads are opt-in. Do not download them during normal paper/PDF runs unless the user explicitly asks for supplementary materials or passes `--include-supplementary`.
+- Supplementary capability verdicts follow the same evidence rule as publisher PDFs: final success, blocker, or unsupported statements require visible built-in CloakBrowser evidence with screenshots or captured files.
+- Supplementary discovery should prefer structured publisher metadata over URL guessing. Use the order: publisher API/XML/object metadata, then visible article-page semantic links/buttons, then publisher-specific URL markers as a final fallback. Do not rely on broad strings such as `figure`, `image`, or generic `download` unless another signal proves the file is supplementary/supporting material.
+- For Elsevier/ScienceDirect supplementary files, use the API-first structured route: `view=FULL` XML -> supplementary `object` / `attachment` refs such as `mmc`, `supplementary-material`, `supporting`, or `appendix` -> `/content/object/eid/{eid}`. Save files by object EID, not by `Content-Disposition`, because Elsevier may return generic names such as `f.txt`. Treat PDFs, Office files, ZIP/data bundles, media, and other non-HTML binary files as valid supplementary assets when the structured metadata marks them as supplementary.
+- The 2026-06-23 smoke-test matrix is recorded in `instsci/data/publisher_supplementary_smoke_matrix.md` and `instsci/data/publisher_supplementary_smoke_matrix.json`. Treat short-run missing candidates as inconclusive unless the visible browser evidence rules out supplementary materials.
+- For Science/AAAS supplementary batches, use the long-lived `science` broker and start from publisher article pages. Do not use CARSI portal preauth for this normal article route unless the task is explicitly testing the CARSI portal itself; preauth can park the browser on resource pages instead of the publisher article flow.
+- After user-selected institution login for Science/AAAS, verify reusable article-page access signals and supplementary controls before considering the broker ready. Avoid manual navigation to federation/resource pages, arbitrary `action/ssostart` URLs, malformed DOI URLs, or same-page skip anchors; if the browser path is confused, enqueue a clean article-page broker job. Detailed dated examples belong in the supplementary smoke matrix, not here.
 
 ## Institutional Identity / Access Route Rule
 

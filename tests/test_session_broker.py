@@ -74,6 +74,182 @@ class SessionBrokerTests(unittest.TestCase):
         self.assertIn("Example University", payload["institution_aliases"])
         self.assertIn("broker", result.output.lower())
 
+    def test_papers_include_supplementary_passes_to_broker_submission(self):
+        runner = CliRunner()
+        with TemporaryDirectory() as tmp:
+            doi_file = Path(tmp) / "dois.txt"
+            doi_file.write_text("10.1016/j.watres.2024.121507\n", encoding="utf-8")
+            state = BrokerState(
+                publisher="elsevier",
+                profile_dir=str(Path(tmp) / "profile"),
+                pid=12345,
+                queue_dir=str(Path(tmp) / "queue"),
+                started_at="2026-06-07T00:00:00",
+                ttl_seconds=86400,
+            )
+            (Path(tmp) / "queue").mkdir()
+            config = Config(
+                school="Example University",
+                output_dir=str(Path(tmp) / "out"),
+                cache_dir=str(Path(tmp) / "cache"),
+                cookie_path=str(Path(tmp) / "cookies.json"),
+                chrome_profile_dir=str(Path(tmp) / "profile"),
+                carsi_cookie_dir=str(Path(tmp) / "carsi"),
+            )
+
+            with patch("instsci.cli.Config.load", return_value=config), \
+                 patch("instsci.session_broker.BROKER_ROOT", Path(tmp)), \
+                 patch("instsci.session_broker.pid_is_running", return_value=True), \
+                 patch("instsci.session_broker.submit_broker_job") as submit:
+                write_broker_state(state)
+                submit.return_value = {
+                    "count": 1,
+                    "success": 1,
+                    "missing": 0,
+                    "unverified": 0,
+                    "verified_match": 1,
+                    "pdf_dir": str(Path(tmp) / "complete" / "pdfs"),
+                    "manifest": str(Path(tmp) / "complete" / "manifest.csv"),
+                    "publisher": "Elsevier",
+                }
+
+                result = runner.invoke(
+                    app,
+                    ["papers", str(doi_file), "-p", "elsevier", "--include-supplementary"],
+                )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(submit.call_args.kwargs["include_supplementary"])
+
+    def test_publisher_batch_defaults_to_broker_submission_when_available(self):
+        runner = CliRunner()
+        with TemporaryDirectory() as tmp:
+            doi_file = Path(tmp) / "dois.txt"
+            doi_file.write_text("10.1126/sciadv.adp3964\n", encoding="utf-8")
+            state = BrokerState(
+                publisher="science",
+                profile_dir=str(Path(tmp) / "profile"),
+                pid=12345,
+                queue_dir=str(Path(tmp) / "queue"),
+                started_at="2026-06-07T00:00:00",
+                ttl_seconds=86400,
+            )
+            (Path(tmp) / "queue").mkdir()
+            config = Config(
+                school="Example University",
+                output_dir=str(Path(tmp) / "out"),
+                cache_dir=str(Path(tmp) / "cache"),
+                cookie_path=str(Path(tmp) / "cookies.json"),
+                chrome_profile_dir=str(Path(tmp) / "profile"),
+                carsi_cookie_dir=str(Path(tmp) / "carsi"),
+            )
+
+            with patch("instsci.cli.Config.load", return_value=config), \
+                 patch("instsci.session_broker.BROKER_ROOT", Path(tmp)), \
+                 patch("instsci.session_broker.pid_is_running", return_value=True), \
+                 patch("instsci.session_broker.submit_broker_job") as submit:
+                write_broker_state(state)
+                submit.return_value = {
+                    "count": 1,
+                    "success": 1,
+                    "missing": 0,
+                    "unverified": 0,
+                    "verified_match": 1,
+                    "pdf_dir": str(Path(tmp) / "complete" / "pdfs"),
+                    "manifest": str(Path(tmp) / "complete" / "manifest.csv"),
+                    "publisher": "Science",
+                    "attempt_cache": str(Path(tmp) / "attempts.jsonl"),
+                }
+
+                result = runner.invoke(app, ["publisher-batch", str(doi_file), "-p", "science"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        submit.assert_called_once()
+        payload = submit.call_args.kwargs
+        self.assertEqual(payload["publisher"], "science")
+        self.assertEqual(payload["records"][0]["doi"], "10.1126/sciadv.adp3964")
+        self.assertEqual(payload["institution"], "Example University")
+        self.assertTrue(payload["retry_failed"])
+        self.assertIn("broker", result.output.lower())
+
+    def test_publisher_batch_detach_enqueues_science_supplementary_job(self):
+        runner = CliRunner()
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            doi_file = base / "dois.txt"
+            doi_file.write_text("10.1126/sciadv.adp3964\n", encoding="utf-8")
+            attempt_cache = base / "attempts.jsonl"
+            broker_root = base / "brokers"
+            jobs_root = base / "jobs"
+            queue_dir = base / "queue"
+            queue_dir.mkdir()
+            state = BrokerState(
+                publisher="science",
+                profile_dir=str(base / "profile"),
+                pid=12345,
+                queue_dir=str(queue_dir),
+                started_at="2026-06-07T00:00:00",
+                ttl_seconds=259200,
+            )
+            config = Config(
+                school="Example University",
+                output_dir=str(base / "out"),
+                cache_dir=str(base / "cache"),
+                cookie_path=str(base / "cookies.json"),
+                chrome_profile_dir=str(base / "profile"),
+                carsi_cookie_dir=str(base / "carsi"),
+            )
+
+            with patch("instsci.cli.Config.load", return_value=config), \
+                 patch("instsci.session_broker.BROKER_ROOT", broker_root), \
+                 patch("instsci.job_store.JOBS_ROOT", jobs_root), \
+                 patch("instsci.session_broker.pid_is_running", return_value=True):
+                write_broker_state(state)
+
+                result = runner.invoke(
+                    app,
+                    [
+                        "publisher-batch",
+                        str(doi_file),
+                        "-p",
+                        "science",
+                        "--detach",
+                        "--supplementary-only",
+                        "--supplementary-fast",
+                        "--carsi-portal-preauth",
+                        "--no-retry",
+                        "--target-verified",
+                        "1",
+                        "--attempt-cache",
+                        str(attempt_cache),
+                        "--skip-attempted",
+                        "--output",
+                        str(base / "run"),
+                    ],
+                )
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                queued = json.loads(next(queue_dir.glob("*.json")).read_text(encoding="utf-8"))
+                self.assertTrue(queued["include_supplementary"])
+                self.assertTrue(queued["supplementary_only"])
+                self.assertTrue(queued["supplementary_fast"])
+                self.assertFalse(queued["carsi_portal_preauth"])
+                self.assertFalse(queued["retry_failed"])
+                self.assertEqual(queued["target_verified"], 1)
+                self.assertEqual(queued["attempt_cache"], str(attempt_cache))
+                self.assertTrue(queued["skip_attempted"])
+
+                job = json.loads(next(jobs_root.glob("*.json")).read_text(encoding="utf-8"))
+                self.assertEqual(job["broker_publisher"], "science")
+                self.assertTrue(job["supplementary_only"])
+                self.assertFalse(job["carsi_portal_preauth"])
+                self.assertFalse(job["retry_failed"])
+                self.assertEqual(job["target_verified"], 1)
+                self.assertEqual(job["attempt_cache"], str(attempt_cache))
+                self.assertTrue(job["skip_attempted"])
+                self.assertIn("ignoring", result.output)
+                self.assertIn("--carsi-portal-preauth", result.output)
+
     def test_papers_records_latest_explicit_institution_choice(self):
         runner = CliRunner()
         with TemporaryDirectory() as tmp:
@@ -344,6 +520,59 @@ class SessionBrokerTests(unittest.TestCase):
                 self.assertTrue(queued["carsi_portal_preauth"])
                 job = json.loads(next(jobs_root.glob("*.json")).read_text(encoding="utf-8"))
                 self.assertTrue(job["carsi_portal_preauth"])
+
+    def test_papers_detach_enqueues_include_supplementary(self):
+        runner = CliRunner()
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            doi_file = base / "dois.txt"
+            doi_file.write_text("10.1016/j.watres.2024.121507\n", encoding="utf-8")
+            broker_root = base / "brokers"
+            jobs_root = base / "jobs"
+            queue_dir = base / "queue"
+            queue_dir.mkdir()
+            state = BrokerState(
+                publisher="elsevier",
+                profile_dir=str(base / "profile"),
+                pid=12345,
+                queue_dir=str(queue_dir),
+                started_at="2026-06-07T00:00:00",
+                ttl_seconds=259200,
+            )
+            config = Config(
+                school="Example University",
+                output_dir=str(base / "out"),
+                cache_dir=str(base / "cache"),
+                cookie_path=str(base / "cookies.json"),
+                chrome_profile_dir=str(base / "profile"),
+                carsi_cookie_dir=str(base / "carsi"),
+            )
+
+            with patch("instsci.cli.Config.load", return_value=config), \
+                 patch("instsci.session_broker.BROKER_ROOT", broker_root), \
+                 patch("instsci.job_store.JOBS_ROOT", jobs_root), \
+                 patch("instsci.session_broker.pid_is_running", return_value=True):
+                write_broker_state(state)
+
+                result = runner.invoke(
+                    app,
+                    [
+                        "papers",
+                        str(doi_file),
+                        "-p",
+                        "elsevier",
+                        "--detach",
+                        "--include-supplementary",
+                        "--output",
+                        str(base / "run"),
+                    ],
+                )
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                queued = json.loads(next(queue_dir.glob("*.json")).read_text(encoding="utf-8"))
+                self.assertTrue(queued["include_supplementary"])
+                job = json.loads(next(jobs_root.glob("*.json")).read_text(encoding="utf-8"))
+                self.assertTrue(job["include_supplementary"])
 
     def test_jobs_status_marks_done_job_completed(self):
         runner = CliRunner()

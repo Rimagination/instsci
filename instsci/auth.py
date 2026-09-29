@@ -11,7 +11,10 @@ import requests
 from Crypto.Cipher import AES
 
 try:
-    from .cloakbrowser_compat import prepare_cloakbrowser_runtime
+    from .cloakbrowser_compat import (
+        ensure_browser_python_supported,
+        prepare_cloakbrowser_runtime,
+    )
     prepare_cloakbrowser_runtime()
     from cloakbrowser import launch
     _HAS_CLOAKBROWSER = True
@@ -199,6 +202,7 @@ class WebVPNAuth:
         try:
             # Use persistent context to keep the campus session alive across runs.
             prepare_cloakbrowser_runtime()
+            ensure_browser_python_supported()
             from cloakbrowser import launch_persistent_context
             profile_dir = self.config.chrome_profile_dir
             Path(profile_dir).mkdir(parents=True, exist_ok=True)
@@ -452,6 +456,7 @@ class EZProxyAuth:
             return False
 
         try:
+            ensure_browser_python_supported()
             self._browser = launch(
                 headless=False, humanize=True,
                 args=["--disable-features=CrossOriginOpenerPolicy"],

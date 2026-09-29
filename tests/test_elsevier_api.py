@@ -85,6 +85,88 @@ class ElsevierApiXmlTests(unittest.TestCase):
             ["1-s2.0-S0043135424004093-main.pdf"],
         )
 
+    def test_extract_supplementary_object_refs_uses_structured_mmc_metadata(self):
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <full-text-retrieval-response>
+          <objects>
+            <object category="main" type="MAIN" mimetype="application/pdf" size="900000">
+              <ref>https://api.elsevier.com/content/object/eid/1-s2.0-S0043135424004093-main.pdf</ref>
+            </object>
+            <object category="mmc1" type="standard" mimetype="application/excel" size="60299">
+              <ref>https://api.elsevier.com/content/object/eid/1-s2.0-S0043135424004093-mmc1.xlsx</ref>
+            </object>
+            <object category="thumbnail" type="image" mimetype="image/jpeg" size="1200">
+              <ref>https://api.elsevier.com/content/object/eid/1-s2.0-S0043135424004093-gr1.jpg</ref>
+            </object>
+          </objects>
+        </full-text-retrieval-response>
+        """
+
+        refs = elsevier_api.extract_supplementary_object_refs(xml)
+
+        self.assertEqual([ref.eid for ref in refs], ["1-s2.0-S0043135424004093-mmc1.xlsx"])
+        self.assertEqual(refs[0].content_type, "application/excel")
+        self.assertEqual(refs[0].size_bytes, 60299)
+        self.assertIn("mmc1", refs[0].label)
+
+    def test_fetch_supplementary_objects_downloads_assets_by_eid_name(self):
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <full-text-retrieval-response>
+          <objects>
+            <object category="mmc1" type="standard" mimetype="application/excel" size="12">
+              <ref>https://api.elsevier.com/content/object/eid/1-s2.0-S0043135424004093-mmc1.xlsx</ref>
+            </object>
+            <object category="supplementary-material" type="standard" mimetype="application/pdf" size="12000">
+              <ref>https://api.elsevier.com/content/object/eid/1-s2.0-S0043135424004093-mmc2.pdf</ref>
+            </object>
+          </objects>
+        </full-text-retrieval-response>
+        """
+        calls = []
+
+        class FakeSession:
+            def __init__(self):
+                self.proxies = {}
+
+            def get(self, url, **kwargs):
+                calls.append((url, kwargs))
+                if "/article/doi/" in url:
+                    return _FakeResponse(
+                        200,
+                        text=xml,
+                        headers={"content-type": "application/xml;charset=UTF-8"},
+                    )
+                if "mmc1.xlsx" in url:
+                    return _FakeResponse(
+                        200,
+                        content=b"PK\x03\x04" + b"xlsx-body" * 8,
+                        headers={
+                            "content-type": "application/excel;charset=UTF-8",
+                            "content-disposition": "attachment; filename=f.txt",
+                        },
+                    )
+                return _FakeResponse(
+                    200,
+                    content=b"%PDF-" + b"x" * 12000,
+                    headers={"content-type": "application/pdf;charset=UTF-8"},
+                )
+
+        with patch("instsci.sources.elsevier_api.requests.Session", FakeSession):
+            objects = elsevier_api.fetch_supplementary_objects(
+                "10.1016/j.watres.2024.121507",
+                "key",
+            )
+
+        self.assertEqual([obj.filename for obj in objects], [
+            "1-s2.0-S0043135424004093-mmc1.xlsx",
+            "1-s2.0-S0043135424004093-mmc2.pdf",
+        ])
+        self.assertTrue(objects[0].data.startswith(b"PK\x03\x04"))
+        self.assertEqual(objects[1].data[:5], b"%PDF-")
+        object_calls = [call for call in calls if "/content/object/eid/" in call[0]]
+        self.assertEqual(len(object_calls), 2)
+        self.assertEqual(object_calls[0][1]["headers"]["Accept"], "*/*")
+
     def test_fetch_fulltext_uses_full_view_and_direct_first_before_proxy(self):
         xml = """<?xml version="1.0" encoding="UTF-8"?>
         <full-text-retrieval-response>

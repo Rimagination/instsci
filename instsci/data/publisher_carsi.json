@@ -2,7 +2,7 @@
   "sciencedirect": {
     "name": "ScienceDirect (Elsevier)",
     "domains": ["sciencedirect.com", "elsevier.com"],
-    "login_url": "https://www.sciencedirect.com/institutional-login",
+    "login_url": "https://www.sciencedirect.com/user/institution/login",
     "search_selector": "input#institution-search, input[placeholder*='institution'], input[placeholder*='机构']",
     "result_selector": ".institution-list a, .search-results a, [data-testid='institution-result']",
     "success_url_pattern": "sciencedirect.com",
@@ -11,7 +11,7 @@
   "springer": {
     "name": "Springer Nature",
     "domains": ["link.springer.com", "springer.com", "nature.com"],
-    "login_url": "https://link.springer.com/institutional-login",
+    "login_url": "https://wayf.springernature.com/?redirect_uri=https://link.springer.com",
     "search_selector": "input#institution, input[name='institution'], input[placeholder*='institution']",
     "result_selector": ".institution-list a, .search-result a, ul.institution-results a",
     "success_url_pattern": "springer.com",
@@ -20,7 +20,7 @@
   "wiley": {
     "name": "Wiley Online Library",
     "domains": ["onlinelibrary.wiley.com"],
-    "login_url": "https://onlinelibrary.wiley.com/institutional-login",
+    "login_url": "https://onlinelibrary.wiley.com/action/ssostart?redirectUri=%2F",
     "search_selector": "input#institution-search, input[name='institution']",
     "result_selector": ".institution-results a, .search-results a",
     "success_url_pattern": "wiley.com",
@@ -29,7 +29,7 @@
   "ieee": {
     "name": "IEEE Xplore",
     "domains": ["ieeexplore.ieee.org"],
-    "login_url": "https://ieeexplore.ieee.org/Xplore/home.jsp",
+    "login_url": "https://ieeexplore.ieee.org/servlet/wayf.jsp",
     "search_selector": "input[aria-label='Search for your Institution'], input.inst-typeahead-input, input[aria-label*='Institution']",
     "result_selector": "button, a, [role='button'], [role='option'], li",
     "success_url_pattern": "ieeexplore.ieee.org",
@@ -38,7 +38,7 @@
   "tandfonline": {
     "name": "Taylor & Francis",
     "domains": ["tandfonline.com"],
-    "login_url": "https://www.tandfonline.com/institutional-login",
+    "login_url": "https://www.tandfonline.com/action/ssostart?redirectUri=%2F",
     "search_selector": "input#institution, input[name='institution']",
     "result_selector": ".institution-list a, .search-results a",
     "success_url_pattern": "tandfonline.com",
@@ -47,7 +47,7 @@
   "nature": {
     "name": "Nature",
     "domains": ["nature.com"],
-    "login_url": "https://www.nature.com/institutional-login",
+    "login_url": "https://wayf.springernature.com/?redirect_uri=https://www.nature.com",
     "search_selector": "input#institution, input[name='institution']",
     "result_selector": ".institution-list a, .search-results a",
     "success_url_pattern": "nature.com",

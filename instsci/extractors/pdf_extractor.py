@@ -29,24 +29,16 @@ def extract_text(pdf_path: str | Path) -> str:
         logger.error("PDF file not found: %s", pdf_path)
         return ""
 
+    # Read the bytes ourselves and parse from memory: handing pymupdf a path
+    # can leave the file handle alive until a cyclic-GC pass (observed on
+    # Windows: a freshly written PDF stayed locked and broke temp-dir
+    # cleanup), while a memory stream never touches the file again.
     try:
-        doc = pymupdf.open(str(pdf_path))
-    except Exception as e:
-        logger.error("Failed to open PDF %s: %s", pdf_path, e)
+        data = pdf_path.read_bytes()
+    except OSError as e:
+        logger.error("Failed to read PDF %s: %s", pdf_path, e)
         return ""
-
-    text_parts = []
-    for page in doc:
-        text = page.get_text("text")
-        if text:
-            text_parts.append(text)
-
-    doc.close()
-    full_text = "\n\n".join(text_parts)
-
-    # Clean up common PDF artifacts
-    full_text = _clean_text(full_text)
-    return full_text
+    return extract_from_bytes(data)
 
 
 def extract_figures(pdf_path: str | Path) -> list[str]:
@@ -107,13 +99,14 @@ def extract_from_bytes(pdf_bytes: bytes) -> str:
         logger.error("Failed to open PDF from bytes: %s", e)
         return ""
 
-    text_parts = []
-    for page in doc:
-        text = page.get_text("text")
-        if text:
-            text_parts.append(text)
-
-    doc.close()
+    try:
+        text_parts = []
+        for page in doc:
+            text = page.get_text("text")
+            if text:
+                text_parts.append(text)
+    finally:
+        doc.close()
     return _clean_text("\n\n".join(text_parts))
 
 

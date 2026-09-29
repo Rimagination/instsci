@@ -39,6 +39,26 @@ class PublisherPdfRouterTests(unittest.TestCase):
             candidates,
         )
 
+    def test_elsevier_pii_routes_can_include_supplementary_when_requested(self):
+        supplementary_url = "https://ars.els-cdn.com/content/image/1-s2.0-S0043135426007505-mmc2.pdf"
+
+        candidates = build_pdf_candidates(
+            ELSEVIER_PROFILE,
+            "10.1016/j.watres.2026.126069",
+            source_url="https://www.sciencedirect.com/science/article/pii/S0043135426007505",
+            discovered_urls=[
+                supplementary_url,
+                "https://www.sciencedirect.com/science/article/pii/S0043135426007505/pdfft?md5=abc",
+            ],
+            include_supplementary=True,
+        )
+
+        self.assertEqual(
+            candidates[0],
+            "https://www.sciencedirect.com/science/article/pii/S0043135426007505/pdfft",
+        )
+        self.assertIn(supplementary_url, candidates)
+
     def test_elsevier_pii_extraction_handles_retrieve_and_signed_asset_urls(self):
         self.assertEqual(
             extract_elsevier_pii("https://linkinghub.elsevier.com/retrieve/pii/S0043135426007505"),

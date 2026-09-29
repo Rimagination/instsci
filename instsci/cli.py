@@ -163,14 +163,26 @@ def _resolve_subscription_institution(
 
 
 def _read_paper_records(file: Path):
-    from .publisher_batch import PaperRecord
+    parsed = _load_paper_input(file)
+    if parsed.unresolved:
+        lines = ", ".join(str(row["line"]) for row in parsed.unresolved[:10])
+        console.print(f"[red]Unresolved input rows: {lines}.[/red]")
+        console.print("Run instsci queue on this file to retain unresolved rows and split publisher groups.")
+        raise typer.Exit(1)
+    if parsed.duplicates:
+        console.print(f"[dim]Removed {parsed.duplicates} duplicate DOI rows.[/dim]")
+    return parsed.records
 
-    records = []
-    for raw_line in file.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip().lstrip("\ufeff")
-        if line and not line.startswith("#"):
-            records.append(PaperRecord(doi=line))
-    return records
+
+def _load_paper_input(file: Path):
+    import csv
+    from .paper_input import read_paper_input
+
+    try:
+        return read_paper_input(file)
+    except (OSError, ValueError, csv.Error) as exc:
+        console.print(f"[red]Cannot read paper input: {exc}[/red]")
+        raise typer.Exit(1) from exc
 
 
 def _record_payload(records) -> list[dict[str, str]]:
@@ -188,6 +200,7 @@ def _resolve_papers_profile(records, publisher: str):
         profiles = {profile for profile in inferred if profile is not None}
         if len(profiles) != 1 or len(profiles) != len(set(inferred)):
             console.print("[red]Could not infer one publisher for all DOIs.[/red]")
+            console.print("Run instsci queue on this file to split it into publisher groups.")
             console.print(f"[yellow]Use --publisher with one of: {', '.join(list_publisher_profiles())}.[/yellow]")
             raise typer.Exit(1)
         return profiles.pop()
@@ -204,6 +217,23 @@ def _broker_key_for_profile(profile, publisher: str) -> str:
     if profile_key_arg and profile_key_arg != "auto":
         return profile_key_arg
     return profile.name.lower().replace(" ", "-")
+
+
+def _normalize_carsi_portal_preauth(
+    *,
+    profile,
+    supplementary_only: bool,
+    carsi_portal_preauth: bool,
+) -> bool:
+    if not carsi_portal_preauth:
+        return False
+    if supplementary_only and str(getattr(profile, "name", "")).lower() == "science":
+        console.print(
+            "[yellow]Science/AAAS supplementary-only runs start from article pages; "
+            "ignoring --carsi-portal-preauth for this route.[/yellow]"
+        )
+        return False
+    return True
 
 
 def _ensure_session_broker(
@@ -244,8 +274,15 @@ def _enqueue_papers_job(
     post_login_hold: int,
     post_run_hold: int,
     carsi_portal_preauth: bool,
+    include_supplementary: bool,
+    supplementary_only: bool,
+    supplementary_fast: bool,
     command: str,
     parent_job_id: str = "",
+    retry_failed: bool = True,
+    target_verified: int = 0,
+    attempt_cache: str = "",
+    skip_attempted: bool = False,
 ) -> dict:
     from . import job_store, session_broker
 
@@ -260,6 +297,13 @@ def _enqueue_papers_job(
         post_login_hold=post_login_hold,
         post_run_hold=post_run_hold,
         carsi_portal_preauth=carsi_portal_preauth,
+        include_supplementary=include_supplementary,
+        supplementary_only=supplementary_only,
+        supplementary_fast=supplementary_fast,
+        retry_failed=retry_failed,
+        target_verified=target_verified or None,
+        attempt_cache=attempt_cache,
+        skip_attempted=skip_attempted,
     )
     return job_store.create_job(
         publisher=profile.name,
@@ -276,6 +320,13 @@ def _enqueue_papers_job(
         post_login_hold=post_login_hold,
         post_run_hold=post_run_hold,
         carsi_portal_preauth=carsi_portal_preauth,
+        include_supplementary=include_supplementary,
+        supplementary_only=supplementary_only,
+        supplementary_fast=supplementary_fast,
+        retry_failed=retry_failed,
+        target_verified=target_verified,
+        attempt_cache=attempt_cache,
+        skip_attempted=skip_attempted,
         parent_job_id=parent_job_id,
     )
 
@@ -285,6 +336,29 @@ def _print_job_submitted(job: dict) -> None:
     console.print(f"[dim]Status:[/dim] instsci jobs status {job['id']}")
     console.print(f"[dim]Tail:[/dim] instsci jobs tail {job['id']}")
     console.print(f"[dim]Output:[/dim] {job['output_dir']}")
+
+
+def _print_publisher_download_summary(summary: dict, *, supplementary_only: bool = False) -> None:
+    if summary.get("error"):
+        console.print(f"[red]Broker error:[/red] {summary['error']}")
+    if supplementary_only or bool(summary.get("supplementary_only")):
+        console.print(
+            f"[bold]Done:[/bold] {summary.get('success', 0)}/{summary.get('count', 0)} records with supplementary files, "
+            f"{summary.get('supplementary_count', 0)} supplementary files."
+        )
+    else:
+        console.print(
+            f"[bold]Done:[/bold] {summary.get('success', 0)}/{summary.get('count', 0)} verified PDFs, "
+            f"{summary.get('unverified', 0)} unverified PDFs."
+        )
+    if summary.get("pdf_dir"):
+        console.print(f"[dim]PDF dir: {summary['pdf_dir']}[/dim]")
+    if summary.get("manifest"):
+        console.print(f"[dim]Manifest: {summary['manifest']}[/dim]")
+    if summary.get("failure_categories"):
+        console.print(f"Failure categories: {summary['failure_categories']}")
+        if summary["failure_categories"].get("human_action"):
+            console.print("Complete login or verification in the visible browser, then resume the job.")
 
 
 def _print_jobs_table(jobs: list[dict]) -> None:
@@ -514,9 +588,28 @@ def fetch(
         fetcher.close()
 
 
+@app.command("queue")
+def queue(
+    file: Path = typer.Argument(help="UTF-8 DOI list, CSV or TSV file."),
+    output: str = typer.Option("", "--output", "-o", help="New directory for publisher CSVs and queue.json."),
+):
+    """Plan publisher groups offline and retain unresolved rows for correction."""
+    from .paper_input import write_publisher_queue
+
+    parsed = _load_paper_input(file)
+    directory = Path(output) if output else Path("runs") / f"queue_{datetime.now():%Y%m%d_%H%M%S_%f}"
+    try:
+        manifest = write_publisher_queue(parsed, directory)
+    except OSError as exc:
+        console.print(f"[red]Cannot write queue (use a new output directory): {exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print_json(data=manifest)
+    console.print(f"Queue saved to: {directory.resolve() / 'queue.json'}")
+
+
 @app.command()
 def batch(
-    file: Path = typer.Argument(help="File containing DOIs (one per line)."),
+    file: Path = typer.Argument(help="UTF-8 DOI list, CSV or TSV file."),
     output: str = typer.Option("", "--output", "-o", help="Output directory."),
     format: str = typer.Option("json", "--format", "-f", help="Output format: json, markdown, text."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose logging."),
@@ -528,11 +621,7 @@ def batch(
         console.print(f"[red]File not found: {file}[/red]")
         raise typer.Exit(1)
 
-    dois = [
-        line.strip()
-        for line in file.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
+    dois = [record.doi for record in _read_paper_records(file)]
 
     if not dois:
         console.print("[yellow]No DOIs found in file.[/yellow]")
@@ -588,12 +677,13 @@ def est_batch(
     year: int = typer.Option(2026, "--year", help="Publication year."),
     limit: int = typer.Option(20, "--limit", "-n", help="Number of EST articles."),
     output: str = typer.Option("", "--output", "-o", help="Run output directory."),
-    retry_failed: bool = typer.Option(True, "--retry/--no-retry", help="Retry transient failures in a fresh browser context."),
+    retry_failed: bool = typer.Option(True, "--retry/--no-retry", help="Retry known transient failures once after a cooldown."),
     institution: str = typer.Option("", "--institution", help="Subscription institution search text. Omit to use configured institution or prompt."),
     login_timeout: int = typer.Option(900, "--login-timeout", help="Seconds to wait for manual SSO/2FA completion."),
     pdf_timeout: int = typer.Option(60, "--pdf-timeout", help="Seconds to wait for each candidate PDF navigation."),
     post_login_hold: int = typer.Option(0, "--post-login-hold", help="Seconds to keep the authorized article page open before PDF capture."),
     post_run_hold: int = typer.Option(0, "--post-run-hold", help="Seconds to keep the browser page open after capture or failure."),
+    include_supplementary: bool = typer.Option(False, "--include-supplementary/--no-include-supplementary", help="Also download appendices or supplementary/supporting-information files when available."),
     target_verified: int = typer.Option(0, "--target-verified", help="Stop after this many verified PDFs. Zero disables early stop."),
     attempt_cache: str = typer.Option("", "--attempt-cache", help="JSONL attempt cache path. Defaults to attempts.jsonl in the run directory."),
     skip_attempted: bool = typer.Option(False, "--skip-attempted", help="Skip DOIs already present in the attempt cache."),
@@ -623,6 +713,7 @@ def est_batch(
         pdf_timeout_sec=pdf_timeout,
         post_login_hold_sec=post_login_hold,
         post_run_hold_sec=post_run_hold,
+        include_supplementary=include_supplementary,
     )
     summary = downloader.run_records(
         records,
@@ -632,12 +723,7 @@ def est_batch(
         attempt_cache=attempt_cache or None,
         skip_attempted=skip_attempted,
     )
-    console.print(
-        f"[bold]Done:[/bold] {summary['success']}/{summary['count']} verified PDFs, "
-        f"{summary.get('unverified', 0)} unverified PDFs."
-    )
-    console.print(f"[dim]PDF dir: {summary['pdf_dir']}[/dim]")
-    console.print(f"[dim]Manifest: {summary['manifest']}[/dim]")
+    _print_publisher_download_summary(summary)
     console.print(f"[dim]Attempt cache: {summary['attempt_cache']}[/dim]")
     if summary["missing"] or summary.get("unverified", 0):
         console.print("[yellow]Some items failed or were unverified; see the run manifest and diagnostics folders.[/yellow]")
@@ -646,32 +732,34 @@ def est_batch(
 
 @app.command("publisher-batch")
 def publisher_batch(
-    file: Path = typer.Argument(help="File containing DOI values (one per line)."),
+    file: Path = typer.Argument(help="UTF-8 DOI list, CSV or TSV file."),
     publisher: str = typer.Option("acs", "--publisher", "-p", help="Publisher profile key, e.g. acs, elsevier, wiley, or ieee."),
     output: str = typer.Option("", "--output", "-o", help="Run output directory."),
     browser_profile: str = typer.Option("", "--browser-profile", help="Override the persistent CloakBrowser profile directory."),
-    retry_failed: bool = typer.Option(True, "--retry/--no-retry", help="Retry transient failures in a fresh browser context."),
+    retry_failed: bool = typer.Option(True, "--retry/--no-retry", help="Retry known transient failures once after a cooldown."),
     institution: str = typer.Option("", "--institution", help="Subscription institution search text. Omit to use configured institution or prompt."),
     login_timeout: int = typer.Option(900, "--login-timeout", help="Seconds to wait for manual SSO/2FA completion."),
     pdf_timeout: int = typer.Option(60, "--pdf-timeout", help="Seconds to wait for each candidate PDF navigation."),
     carsi_portal_preauth: bool = typer.Option(False, "--carsi-portal-preauth/--no-carsi-portal-preauth", help="Open the CARSI resource portal first in the same visible CloakBrowser profile."),
+    include_supplementary: bool = typer.Option(False, "--include-supplementary/--no-include-supplementary", help="Also download appendices or supplementary/supporting-information files when available."),
+    supplementary_only: bool = typer.Option(False, "--supplementary-only/--no-supplementary-only", help="Download supplementary/supporting files without first capturing the main PDF."),
+    supplementary_fast: bool = typer.Option(False, "--supplementary-fast/--no-supplementary-fast", help="Use publisher-specific supplementary shortcuts and shorter attachment waits when available."),
     target_verified: int = typer.Option(0, "--target-verified", help="Stop after this many verified PDFs. Zero disables early stop."),
     attempt_cache: str = typer.Option("", "--attempt-cache", help="JSONL attempt cache path. Defaults to attempts.jsonl in the run directory."),
     skip_attempted: bool = typer.Option(False, "--skip-attempted", help="Skip DOIs already present in the attempt cache."),
+    broker: bool = typer.Option(True, "--broker/--no-broker", help="Use the long-lived publisher session broker by default."),
+    broker_ttl: int = typer.Option(259200, "--broker-ttl", help="Seconds to keep an auto-started broker alive."),
+    detach: bool = typer.Option(False, "--detach", help="Submit to the long-lived broker and return immediately."),
 ):
     """Download a DOI list through a named publisher profile and CloakBrowser."""
-    from .publisher_batch import PaperRecord, PublisherBatchDownloader
+    from .publisher_batch import PublisherBatchDownloader
     from .publisher_profiles import get_publisher_profile
 
     if not file.exists():
         console.print(f"[red]File not found: {file}[/red]")
         raise typer.Exit(1)
 
-    records = [
-        PaperRecord(doi=line.strip())
-        for line in file.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
+    records = _read_paper_records(file)
     if not records:
         console.print("[yellow]No DOIs found in file.[/yellow]")
         raise typer.Exit(0)
@@ -685,7 +773,16 @@ def publisher_batch(
     cfg = Config.load()
     if browser_profile:
         cfg.chrome_profile_dir = browser_profile
-    institution = _resolve_subscription_institution(cfg, institution)
+    include_supplementary = bool(include_supplementary or supplementary_only)
+    carsi_portal_preauth = _normalize_carsi_portal_preauth(
+        profile=profile,
+        supplementary_only=supplementary_only,
+        carsi_portal_preauth=carsi_portal_preauth,
+    )
+    if supplementary_only and not institution.strip():
+        institution = _configured_subscription_institution(cfg)
+    else:
+        institution = _resolve_subscription_institution(cfg, institution)
     institution_aliases = _configured_institution_aliases(cfg, institution)
     profile_key = publisher.strip().lower().replace(" ", "-")
     run_dir = Path(output) if output else Path("downloads") / f"{profile_key}_{len(records)}" / f"cloak_{datetime.now():%Y%m%d_%H%M%S}"
@@ -693,7 +790,84 @@ def publisher_batch(
     console.print(f"[bold]Found {len(records)} DOI records.[/bold]")
     console.print(f"[bold]Output:[/bold] {run_dir}")
     console.print(f"[bold]Browser profile:[/bold] {cfg.chrome_profile_dir}")
+    if supplementary_only:
+        console.print("[bold]Supplementary mode:[/bold] attachments only; primary PDF capture is skipped.")
     console.print("[dim]If a CloakBrowser window stops on SSO or 2FA, complete it there and leave the window open.[/dim]")
+
+    broker_publisher = _broker_key_for_profile(profile, publisher)
+    if detach and not broker:
+        console.print("[red]--detach requires the long-lived session broker. Remove --no-broker.[/red]")
+        raise typer.Exit(1)
+    if broker:
+        from . import session_broker
+
+        if _ensure_session_broker(
+            broker_publisher=broker_publisher,
+            cfg=cfg,
+            institution=institution,
+            broker_ttl=broker_ttl,
+        ):
+            console.print(f"[bold]Session broker:[/bold] running ({broker_publisher})")
+            if detach:
+                job = _enqueue_papers_job(
+                    profile=profile,
+                    broker_publisher=broker_publisher,
+                    records=records,
+                    run_dir=run_dir,
+                    cfg=cfg,
+                    institution=institution,
+                    institution_aliases=institution_aliases,
+                    login_timeout=login_timeout,
+                    pdf_timeout=pdf_timeout,
+                    post_login_hold=0,
+                    post_run_hold=0,
+                    carsi_portal_preauth=carsi_portal_preauth,
+                    include_supplementary=include_supplementary,
+                    supplementary_only=supplementary_only,
+                    supplementary_fast=supplementary_fast,
+                    command=" ".join(sys.argv),
+                    retry_failed=retry_failed,
+                    target_verified=target_verified,
+                    attempt_cache=attempt_cache,
+                    skip_attempted=skip_attempted,
+                )
+                _print_job_submitted(job)
+                return
+
+            timeout_seconds = max(
+                120,
+                login_timeout
+                + (login_timeout if carsi_portal_preauth else 0)
+                + len(records) * (pdf_timeout + 60),
+            )
+            summary = session_broker.submit_broker_job(
+                publisher=broker_publisher,
+                records=_record_payload(records),
+                output_dir=str(run_dir),
+                institution=institution,
+                institution_aliases=list(institution_aliases),
+                login_timeout=login_timeout,
+                pdf_timeout=pdf_timeout,
+                post_login_hold=0,
+                post_run_hold=0,
+                carsi_portal_preauth=carsi_portal_preauth,
+                include_supplementary=include_supplementary,
+                supplementary_only=supplementary_only,
+                supplementary_fast=supplementary_fast,
+                retry_failed=retry_failed,
+                target_verified=target_verified or None,
+                attempt_cache=attempt_cache,
+                skip_attempted=skip_attempted,
+                timeout_seconds=timeout_seconds,
+            )
+            _print_publisher_download_summary(summary, supplementary_only=supplementary_only)
+            if summary.get("attempt_cache"):
+                console.print(f"[dim]Attempt cache: {summary['attempt_cache']}[/dim]")
+            if summary["missing"] or summary.get("unverified", 0):
+                console.print("[yellow]Some items failed or were unverified; see the run manifest and diagnostics folders.[/yellow]")
+                raise typer.Exit(2)
+            return
+        console.print("[yellow]Session broker did not start; falling back to one-shot browser workflow.[/yellow]")
 
     downloader = PublisherBatchDownloader(
         cfg,
@@ -703,6 +877,9 @@ def publisher_batch(
         login_timeout_sec=login_timeout,
         pdf_timeout_sec=pdf_timeout,
         carsi_portal_preauth=carsi_portal_preauth,
+        include_supplementary=include_supplementary,
+        supplementary_only=supplementary_only,
+        supplementary_fast=supplementary_fast,
     )
     summary = downloader.run_records(
         records,
@@ -712,12 +889,7 @@ def publisher_batch(
         attempt_cache=attempt_cache or None,
         skip_attempted=skip_attempted,
     )
-    console.print(
-        f"[bold]Done:[/bold] {summary['success']}/{summary['count']} verified PDFs, "
-        f"{summary.get('unverified', 0)} unverified PDFs."
-    )
-    console.print(f"[dim]PDF dir: {summary['pdf_dir']}[/dim]")
-    console.print(f"[dim]Manifest: {summary['manifest']}[/dim]")
+    _print_publisher_download_summary(summary, supplementary_only=supplementary_only)
     console.print(f"[dim]Attempt cache: {summary['attempt_cache']}[/dim]")
     if summary["missing"] or summary.get("unverified", 0):
         console.print("[yellow]Some items failed or were unverified; see the run manifest and diagnostics folders.[/yellow]")
@@ -726,7 +898,7 @@ def publisher_batch(
 
 @app.command("papers")
 def papers(
-    file: Path = typer.Argument(help="File containing DOI values (one per line)."),
+    file: Path = typer.Argument(help="UTF-8 DOI list, CSV or TSV file."),
     publisher: str = typer.Option("auto", "--publisher", "-p", help="Publisher profile, or 'auto' to infer from DOI prefixes."),
     output: str = typer.Option("", "--output", "-o", help="Run output directory."),
     browser_profile: str = typer.Option("", "--browser-profile", help="Override the persistent CloakBrowser profile directory."),
@@ -736,7 +908,10 @@ def papers(
     post_login_hold: int = typer.Option(0, "--post-login-hold", help="Seconds to keep the authorized article page open before PDF capture."),
     post_run_hold: int = typer.Option(0, "--post-run-hold", help="Seconds to keep the browser page open after capture or failure."),
     carsi_portal_preauth: bool = typer.Option(False, "--carsi-portal-preauth/--no-carsi-portal-preauth", help="Open the CARSI resource portal first in the same visible CloakBrowser profile."),
-    retry_failed: bool = typer.Option(True, "--retry/--no-retry", help="Retry transient failures in a fresh browser context."),
+    include_supplementary: bool = typer.Option(False, "--include-supplementary/--no-include-supplementary", help="Also download appendices or supplementary/supporting-information files when available."),
+    supplementary_only: bool = typer.Option(False, "--supplementary-only/--no-supplementary-only", help="Download supplementary/supporting files without first capturing the main PDF."),
+    supplementary_fast: bool = typer.Option(False, "--supplementary-fast/--no-supplementary-fast", help="Use publisher-specific supplementary shortcuts and shorter attachment waits when available."),
+    retry_failed: bool = typer.Option(True, "--retry/--no-retry", help="Retry known transient failures once after a cooldown."),
     concurrency: int = typer.Option(1, "--concurrency", "-j", min=1, max=4, help="Parallel browser workers. Use 2 for ScienceDirect; higher values may trigger publisher checks."),
     broker: bool = typer.Option(True, "--broker/--no-broker", help="Use the long-lived publisher session broker by default."),
     broker_ttl: int = typer.Option(259200, "--broker-ttl", help="Seconds to keep an auto-started broker alive."),
@@ -759,7 +934,16 @@ def papers(
     cfg = Config.load()
     if browser_profile:
         cfg.chrome_profile_dir = browser_profile
-    institution = _resolve_subscription_institution(cfg, institution)
+    include_supplementary = bool(include_supplementary or supplementary_only)
+    carsi_portal_preauth = _normalize_carsi_portal_preauth(
+        profile=profile,
+        supplementary_only=supplementary_only,
+        carsi_portal_preauth=carsi_portal_preauth,
+    )
+    if supplementary_only and not institution.strip():
+        institution = _configured_subscription_institution(cfg)
+    else:
+        institution = _resolve_subscription_institution(cfg, institution)
     institution_aliases = _configured_institution_aliases(cfg, institution)
     profile_key = profile.name.lower().replace(" ", "-")
     run_dir = Path(output) if output else Path("downloads") / f"papers_{profile_key}_{len(records)}" / f"browser_{datetime.now():%Y%m%d_%H%M%S}"
@@ -769,6 +953,8 @@ def papers(
     console.print(f"[bold]Found {len(records)} DOI records.[/bold]")
     console.print(f"[bold]Output:[/bold] {run_dir}")
     console.print(f"[bold]Browser profile:[/bold] {cfg.chrome_profile_dir}")
+    if supplementary_only:
+        console.print("[bold]Supplementary mode:[/bold] attachments only; primary PDF capture is skipped.")
 
     broker_publisher = _broker_key_for_profile(profile, publisher)
     if detach and not broker:
@@ -798,7 +984,11 @@ def papers(
                     post_login_hold=post_login_hold,
                     post_run_hold=post_run_hold,
                     carsi_portal_preauth=carsi_portal_preauth,
+                    include_supplementary=include_supplementary,
+                    supplementary_only=supplementary_only,
+                    supplementary_fast=supplementary_fast,
                     command=" ".join(sys.argv),
+                    retry_failed=retry_failed,
                 )
                 _print_job_submitted(job)
                 return
@@ -818,14 +1008,13 @@ def papers(
                 post_login_hold=post_login_hold,
                 post_run_hold=post_run_hold,
                 carsi_portal_preauth=carsi_portal_preauth,
+                include_supplementary=include_supplementary,
+                supplementary_only=supplementary_only,
+                supplementary_fast=supplementary_fast,
+                retry_failed=retry_failed,
                 timeout_seconds=timeout_seconds,
             )
-            console.print(
-                f"[bold]Done:[/bold] {summary['success']}/{summary['count']} verified PDFs, "
-                f"{summary.get('unverified', 0)} unverified PDFs."
-            )
-            console.print(f"[dim]PDF dir: {summary['pdf_dir']}[/dim]")
-            console.print(f"[dim]Manifest: {summary['manifest']}[/dim]")
+            _print_publisher_download_summary(summary, supplementary_only=supplementary_only)
             if summary["missing"] or summary.get("unverified", 0):
                 console.print("[yellow]Some items need manual CAPTCHA/login attention; rerun the same command after completing it.[/yellow]")
                 raise typer.Exit(2)
@@ -842,6 +1031,9 @@ def papers(
         post_login_hold_sec=post_login_hold,
         post_run_hold_sec=post_run_hold,
         carsi_portal_preauth=carsi_portal_preauth,
+        include_supplementary=include_supplementary,
+        supplementary_only=supplementary_only,
+        supplementary_fast=supplementary_fast,
     )
     summary = downloader.run_records(
         records,
@@ -849,12 +1041,7 @@ def papers(
         retry_failed=retry_failed,
         concurrency=concurrency,
     )
-    console.print(
-        f"[bold]Done:[/bold] {summary['success']}/{summary['count']} verified PDFs, "
-        f"{summary.get('unverified', 0)} unverified PDFs."
-    )
-    console.print(f"[dim]PDF dir: {summary['pdf_dir']}[/dim]")
-    console.print(f"[dim]Manifest: {summary['manifest']}[/dim]")
+    _print_publisher_download_summary(summary, supplementary_only=supplementary_only)
     if summary["missing"] or summary.get("unverified", 0):
         console.print("[yellow]Some items need manual CAPTCHA/login attention; rerun the same command after completing it.[/yellow]")
         raise typer.Exit(2)
@@ -946,6 +1133,7 @@ def jobs_resume(
     job_id: str = typer.Argument(help="Job id to resume."),
     output: str = typer.Option("", "--output", "-o", help="Output directory for the resumed run."),
     broker_ttl: int = typer.Option(259200, "--broker-ttl", help="Seconds to keep an auto-started broker alive."),
+    transient_only: bool = typer.Option(False, "--transient-only", help="Select only known timeout, network or temporary publisher failures."),
 ):
     """Submit a follow-up job for missing or unverified DOI records."""
     from . import job_store
@@ -958,9 +1146,9 @@ def jobs_resume(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
-    retry_payload = job_store.retry_records(job)
+    retry_payload = job_store.retry_records(job, transient_only=transient_only)
     if not retry_payload:
-        console.print("[green]No missing or unverified records need resuming.[/green]")
+        console.print("[green]No records match the requested resume policy.[/green]")
         return
 
     broker_publisher = str(job.get("broker_publisher") or "").strip()
@@ -1004,8 +1192,15 @@ def jobs_resume(
         post_login_hold=int(job.get("post_login_hold") or 0),
         post_run_hold=int(job.get("post_run_hold") or 0),
         carsi_portal_preauth=bool(job.get("carsi_portal_preauth")),
+        include_supplementary=bool(job.get("include_supplementary")),
+        supplementary_only=bool(job.get("supplementary_only")),
+        supplementary_fast=bool(job.get("supplementary_fast")),
         command=f"instsci jobs resume {job_id}",
         parent_job_id=job_id,
+        retry_failed=bool(job.get("retry_failed", True)),
+        target_verified=int(job.get("target_verified") or 0),
+        attempt_cache=str(job.get("attempt_cache") or ""),
+        skip_attempted=False,
     )
     _print_job_submitted(resumed)
 
@@ -1093,7 +1288,9 @@ def session_broker_run(
     cfg = Config.load()
     if browser_profile:
         cfg.chrome_profile_dir = browser_profile
-    institution = _resolve_subscription_institution(cfg, institution, prompt=False)
+    institution = institution.strip() or _configured_subscription_institution(cfg)
+    if institution:
+        institution = _resolve_subscription_institution(cfg, institution, prompt=False)
     institution_aliases = _configured_institution_aliases(cfg, institution)
     profile = get_publisher_profile(publisher)
     root = broker_dir(publisher)
@@ -1132,8 +1329,6 @@ def session_broker_run(
                     job["started_at"] = job.get("started_at") or datetime.now().isoformat(timespec="seconds")
                     job_path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
                     run_dir = Path(str(job["output_dir"]))
-                    primary_dir = run_dir / "primary"
-                    primary_dir.mkdir(parents=True, exist_ok=True)
                     job_downloader = PublisherBatchDownloader(
                         cfg,
                         profile=profile,
@@ -1144,16 +1339,20 @@ def session_broker_run(
                         post_login_hold_sec=int(job.get("post_login_hold") or 0),
                         post_run_hold_sec=int(job.get("post_run_hold") or 0),
                         carsi_portal_preauth=bool(job.get("carsi_portal_preauth")),
+                        include_supplementary=bool(job.get("include_supplementary")),
+                        supplementary_only=bool(job.get("supplementary_only")),
+                        supplementary_fast=bool(job.get("supplementary_fast")),
                     )
-                    job_downloader._preauthenticate_carsi_portal(context)
                     records = [PaperRecord(**record) for record in job.get("records", [])]
-                    results = []
-                    for record in records:
-                        results.append(job_downloader.fetch_one(context, record, primary_dir))
-                        job_downloader._write_results(primary_dir / "summary_partial.json", results)
-                    job_downloader._write_results(primary_dir / "summary.json", results)
-                    summary = job_downloader._write_complete_artifacts(records, results, run_dir)
-                    summary["publisher"] = profile.name
+                    summary = job_downloader.run_records_with_context(
+                        context,
+                        records,
+                        run_dir,
+                        retry_failed=bool(job.get("retry_failed", True)),
+                        target_verified=int(job.get("target_verified") or 0) or None,
+                        attempt_cache=str(job.get("attempt_cache") or "") or None,
+                        skip_attempted=bool(job.get("skip_attempted")),
+                    )
                     summary["broker"] = True
                     summary["job_id"] = job.get("id", "")
                     summary["browser_profile_dir"] = cfg.chrome_profile_dir

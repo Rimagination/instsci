@@ -37,6 +37,25 @@ class _Route:
     proxies: dict[str, str] | None = None
 
 
+@dataclass(frozen=True)
+class SupplementaryObjectRef:
+    eid: str
+    label: str = ""
+    content_type: str = ""
+    size_bytes: int | None = None
+
+
+@dataclass(frozen=True)
+class SupplementaryObject:
+    eid: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    route: str
+    url: str
+    data: bytes
+
+
 def get_api_key(config_key: str = "") -> str:
     """Get Elsevier API key from config or environment."""
     return config_key or os.environ.get("ELSEVIER_API_KEY", "")
@@ -124,11 +143,77 @@ def fetch_fulltext(
             continue
 
         parsed["pdf_eids"] = _extract_main_pdf_eids(resp.text)
+        parsed["supplementary_object_refs"] = [
+            {
+                "eid": ref.eid,
+                "label": ref.label,
+                "content_type": ref.content_type,
+                "size_bytes": ref.size_bytes,
+            }
+            for ref in extract_supplementary_object_refs(resp.text)
+        ]
         parsed["api_route"] = route.name
         parsed["els_status"] = resp.headers.get("X-ELS-Status", "")
         return parsed
 
     return None
+
+
+def fetch_supplementary_objects(
+    doi: str,
+    api_key: str,
+    inst_token: str = "",
+    *,
+    proxy_url: str = "",
+    supplementary_refs: list[SupplementaryObjectRef] | None = None,
+    preferred_route: str = "",
+) -> list[SupplementaryObject]:
+    """Download supplementary/supporting files through Elsevier object/eid API."""
+    if not api_key:
+        return []
+
+    fetched: list[SupplementaryObject] = []
+    fetched_eids: set[str] = set()
+    routes = _route_options(proxy_url, preferred_route=preferred_route)
+    refs_by_route: dict[str, list[SupplementaryObjectRef]] = {}
+
+    if supplementary_refs is not None:
+        for route in routes:
+            refs_by_route[route.name] = list(supplementary_refs)
+    else:
+        for route in routes:
+            resp = _get_article_xml_response(doi, api_key, inst_token, route)
+            if resp is None:
+                refs_by_route[route.name] = []
+                continue
+            if resp.status_code != 200:
+                _log_api_response("XML", doi, route, resp)
+                refs_by_route[route.name] = []
+                continue
+            refs = extract_supplementary_object_refs(resp.text)
+            refs_by_route[route.name] = refs
+            if refs:
+                routes = _route_options(proxy_url, preferred_route=route.name)
+                for object_route in routes:
+                    refs_by_route.setdefault(object_route.name, refs)
+                break
+
+    for route in routes:
+        refs = refs_by_route.get(route.name)
+        if refs is None and supplementary_refs is not None:
+            refs = list(supplementary_refs)
+        if not refs:
+            continue
+        for obj in _fetch_supplementary_objects(doi, refs, api_key, inst_token, route):
+            key = obj.eid.lower()
+            if key in fetched_eids:
+                continue
+            fetched_eids.add(key)
+            fetched.append(obj)
+        if len(fetched_eids) >= len({ref.eid.lower() for ref in refs}):
+            break
+
+    return fetched
 
 
 def _get_article_xml_response(
@@ -197,6 +282,55 @@ def _fetch_object_pdf(
         return resp.content
 
     return None
+
+
+def _fetch_supplementary_objects(
+    doi: str,
+    refs: list[SupplementaryObjectRef],
+    api_key: str,
+    inst_token: str,
+    route: _Route,
+) -> list[SupplementaryObject]:
+    headers = {
+        "X-ELS-APIKey": api_key,
+        "Accept": "*/*",
+    }
+    if inst_token:
+        headers["X-ELS-Insttoken"] = inst_token
+
+    objects: list[SupplementaryObject] = []
+    for ref in refs:
+        url = f"{ELSEVIER_OBJECT_API}/{quote(ref.eid, safe='')}"
+        resp = _api_get(url, headers=headers, route=route, timeout=60)
+        if resp is None:
+            continue
+        if resp.status_code != 200:
+            _log_api_response("supplementary_object", doi, route, resp, eid=ref.eid)
+            continue
+        content_type = resp.headers.get("content-type", "") or ref.content_type
+        body = resp.content or b""
+        if not _is_downloadable_supplementary_body(body, content_type):
+            logger.info(
+                "Elsevier supplementary object route=%s eid=%s returned non-file (%s, %d bytes)",
+                route.name,
+                ref.eid,
+                content_type[:50],
+                len(body),
+            )
+            continue
+        objects.append(
+            SupplementaryObject(
+                eid=ref.eid,
+                filename=_supplementary_filename_from_ref(ref, resp.headers),
+                content_type=content_type,
+                size_bytes=len(body),
+                route=route.name,
+                url=url,
+                data=body,
+            )
+        )
+
+    return objects
 
 
 def _api_get(
@@ -296,6 +430,36 @@ def _extract_main_pdf_eids(xml_text: str) -> list[str]:
     return _dedupe([eid for _, eid in candidates])
 
 
+def extract_supplementary_object_refs(xml_text: str) -> list[SupplementaryObjectRef]:
+    """Extract structured Elsevier supplementary/supporting object references."""
+    try:
+        root = ET.fromstring(xml_text)
+    except (ET.ParseError, TypeError):
+        return []
+
+    parent_map = {child: parent for parent in root.iter() for child in parent}
+    refs: list[SupplementaryObjectRef] = []
+    seen: set[str] = set()
+
+    for el in root.iter():
+        context = _candidate_context(el, parent_map)
+        values = list(el.attrib.values())
+        if el.text:
+            values.append(el.text)
+        for value in values:
+            for raw_eid in _EID_RE.findall(value or ""):
+                normalized = raw_eid.strip()
+                if not _looks_supplementary_object(normalized, context):
+                    continue
+                key = normalized.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                refs.append(_supplementary_ref_from_element(normalized, el, parent_map))
+
+    return refs
+
+
 def _candidate_context(el: ET.Element, parent_map: dict[ET.Element, ET.Element]) -> str:
     parts: list[str] = []
     current: ET.Element | None = el
@@ -336,6 +500,87 @@ def _score_pdf_eid(eid: str, context: str) -> int:
 def _looks_supplementary(eid: str, context: str) -> bool:
     haystack = f"{eid} {context}".lower()
     return any(hint in haystack for hint in _SUPPLEMENT_HINTS)
+
+
+def _looks_supplementary_object(eid: str, context: str) -> bool:
+    haystack = f"{eid} {context}".lower()
+    if eid.lower().endswith("-main.pdf") or " type main " in f" {haystack} ":
+        return False
+    strong_hints = (
+        "supplement",
+        "supplementary",
+        "supporting",
+        "appendix",
+        "additional file",
+        "additional material",
+        " mmc",
+        "-mmc",
+        "_mmc",
+    )
+    if any(hint in haystack for hint in strong_hints):
+        return True
+    weak_non_supplementary = (
+        "thumbnail",
+        "graphical abstract",
+        "cover image",
+        "inline image",
+    )
+    if any(hint in haystack for hint in weak_non_supplementary):
+        return False
+    return False
+
+
+def _supplementary_ref_from_element(
+    eid: str,
+    el: ET.Element,
+    parent_map: dict[ET.Element, ET.Element],
+) -> SupplementaryObjectRef:
+    labels: list[str] = []
+    content_type = ""
+    size_bytes: int | None = None
+    current: ET.Element | None = el
+    for _ in range(3):
+        if current is None:
+            break
+        for raw_key, raw_value in current.attrib.items():
+            key = _local_name(raw_key).lower()
+            value = str(raw_value or "").strip()
+            if not value:
+                continue
+            if key in {"category", "type", "role", "label", "multimediatype"}:
+                labels.append(value)
+            if key in {"mimetype", "mime-type", "content-type"} and not content_type:
+                content_type = value
+            if key == "size" and size_bytes is None:
+                try:
+                    size_bytes = int(value)
+                except ValueError:
+                    pass
+        current = parent_map.get(current)
+    return SupplementaryObjectRef(
+        eid=eid,
+        label=" ".join(dict.fromkeys(labels)),
+        content_type=content_type,
+        size_bytes=size_bytes,
+    )
+
+
+def _is_downloadable_supplementary_body(body: bytes, content_type: str) -> bool:
+    if len(body) < 32:
+        return False
+    lower_type = content_type.lower()
+    head = body[:128].lstrip().lower()
+    if "text/html" in lower_type or head.startswith((b"<!doctype", b"<html")):
+        return False
+    return True
+
+
+def _supplementary_filename_from_ref(
+    ref: SupplementaryObjectRef,
+    headers: dict[str, str],
+) -> str:
+    raw_name = ref.eid.rsplit("/", 1)[-1]
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", raw_name) or "supplementary.bin"
 
 
 def _local_name(tag: str) -> str:
